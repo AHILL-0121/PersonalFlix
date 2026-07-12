@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+plan/
+# Build outputs
+.next/
+frontend/.next/
+out/
+frontend/out/
+dist/
+frontend/dist/
+
+# Local environment files (keep templates)
+.env
+.env.local
+.env.*
+frontend/.env.local
+frontend/.env.*
+!.env.example
+!frontend/.env.example
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+
+*.md
+!README.md

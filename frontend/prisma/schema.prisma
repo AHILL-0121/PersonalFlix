@@ -1,0 +1,105 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TitleType {
+  movie
+  series
+}
+
+model Title {
+  id            String    @id @default(uuid())
+  driveFolderId String    @unique
+  type          TitleType
+  name          String
+  posterUrl     String?
+  
+  // OMDb / TMDB / IMDb fields
+  imdbId        String?
+  tmdbId        Int?
+  backdropUrl   String?
+  overview      String?
+  rating        Float?
+  year          Int?
+
+  seasons       Season[]
+  episodes      Episode[]
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+model Season {
+  id       String    @id @default(uuid())
+  titleId  String
+  number   Int
+  title    Title     @relation(fields: [titleId], references: [id], onDelete: Cascade)
+  episodes Episode[]
+
+  // OMDb / TMDB / IMDb fields
+  imdbId    String?
+  tmdbId    Int?
+  posterUrl String?
+
+  @@unique([titleId, number])
+}
+
+model Episode {
+  id            String          @id @default(uuid())
+  seasonId      String?
+  titleId       String
+  driveFileId   String          @unique
+  name          String
+  order         Int
+  durationSec   Int?
+
+  // OMDb / TMDB / IMDb fields
+  imdbId        String?
+  tmdbId        Int?
+  thumbnailUrl  String?
+  overview      String?
+
+  season        Season?         @relation(fields: [seasonId], references: [id], onDelete: SetNull)
+  title         Title           @relation(fields: [titleId], references: [id], onDelete: Cascade)
+  subtitleTracks SubtitleTrack[]
+  audioTracks   AudioTrack[]
+  watchProgress WatchProgress?
+  processed     Boolean         @default(false)
+
+  @@index([titleId])
+  @@index([seasonId])
+}
+
+model SubtitleTrack {
+  id          String  @id @default(uuid())
+  episodeId   String
+  language    String
+  driveFileId String
+  episode     Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+
+  @@index([episodeId])
+}
+
+model AudioTrack {
+  id          String  @id @default(uuid())
+  episodeId   String
+  language    String
+  driveFileId String
+  episode     Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+
+  @@index([episodeId])
+}
+
+model WatchProgress {
+  episodeId   String   @id
+  positionSec Float    @default(0)
+  updatedAt   DateTime @updatedAt
+  episode     Episode  @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+}
