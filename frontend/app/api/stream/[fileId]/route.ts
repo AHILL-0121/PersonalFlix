@@ -65,7 +65,6 @@ export async function GET(req: Request, { params }: RouteParams) {
             }
         );
 
-        // @ts-expect-error — drive stream is a Node.js Readable
         const readable = driveStream.data as NodeJS.ReadableStream;
 
         // Convert Node.js stream to Web ReadableStream
