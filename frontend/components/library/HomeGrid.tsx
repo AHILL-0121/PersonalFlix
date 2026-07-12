@@ -89,10 +89,10 @@ export default function HomeGrid({ movies, series, continueWatching }: HomeGridP
                         Continue Watching
                     </h2>
                     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7 gap-3">
-                        {continueWatching.map(({ episode }) => {
+                        {continueWatching.map((item) => {
+                            const { episode, positionSec } = item;
                             const prog = episode.durationSec
-                                ? ((episode.watchProgress as { positionSec?: number } | null | undefined)
-                                    ?.positionSec ?? 0) / episode.durationSec
+                                ? (positionSec ?? 0) / episode.durationSec
                                 : 0;
                             return (
                                 <PosterCard

@@ -75,7 +75,7 @@ export async function GET(req: Request, { params }: RouteParams) {
                 readable.on("error", (err: Error) => controller.error(err));
             },
             cancel() {
-                readable.destroy();
+                (readable as any).destroy();
             },
         });
 

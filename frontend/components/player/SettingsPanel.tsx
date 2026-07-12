@@ -69,8 +69,8 @@ export default function SettingsPanel({
                         id={`settings-tab-${tab.id}`}
                         onClick={() => setActiveTab(tab.id)}
                         className={`flex-1 py-2 text-xs font-medium transition-colors duration-150 ${activeTab === tab.id
-                                ? "text-accent border-b-2 border-accent -mb-px"
-                                : "text-text-secondary hover:text-text-primary"
+                            ? "text-accent border-b-2 border-accent -mb-px"
+                            : "text-text-secondary hover:text-text-primary"
                             }`}
                     >
                         {tab.label}
@@ -87,8 +87,8 @@ export default function SettingsPanel({
                             id={`speed-${speed}`}
                             onClick={() => onRateChange(speed)}
                             className={`w-full px-4 py-2 text-sm text-left transition-colors duration-100 ${playbackRate === speed
-                                    ? "text-accent font-semibold"
-                                    : "text-text-secondary hover:bg-white/5 hover:text-text-primary"
+                                ? "text-accent font-semibold"
+                                : "text-text-secondary hover:bg-white/5 hover:text-text-primary"
                                 }`}
                         >
                             {speed === 1 ? "Normal" : `${speed}×`}
@@ -101,8 +101,8 @@ export default function SettingsPanel({
                             id="subtitle-off"
                             onClick={() => selectSubtitle(null)}
                             className={`w-full px-4 py-2 text-sm text-left transition-colors duration-100 ${!activeSubtitle
-                                    ? "text-accent font-semibold"
-                                    : "text-text-secondary hover:bg-white/5 hover:text-text-primary"
+                                ? "text-accent font-semibold"
+                                : "text-text-secondary hover:bg-white/5 hover:text-text-primary"
                                 }`}
                         >
                             Off
@@ -113,8 +113,8 @@ export default function SettingsPanel({
                                 id={`subtitle-${t.language}`}
                                 onClick={() => selectSubtitle(t.language)}
                                 className={`w-full px-4 py-2 text-sm text-left transition-colors duration-100 ${activeSubtitle === t.language
-                                        ? "text-accent font-semibold"
-                                        : "text-text-secondary hover:bg-white/5 hover:text-text-primary"
+                                    ? "text-accent font-semibold"
+                                    : "text-text-secondary hover:bg-white/5 hover:text-text-primary"
                                     }`}
                             >
                                 {t.language.toUpperCase()}
@@ -133,10 +133,10 @@ export default function SettingsPanel({
                                     // Audio track switching via HTMLVideoElement.audioTracks (where supported)
                                     const v = videoRef.current;
                                     if (v && "audioTracks" in v) {
-                                        const tracks = (v as HTMLVideoElement & { audioTracks: AudioTrackList }).audioTracks;
+                                        const tracks = (v as any).audioTracks;
                                         for (let i = 0; i < tracks.length; i++) {
-                                            (tracks[i] as AudioTrack & { enabled: boolean }).enabled =
-                                                tracks[i].language === t.language;
+                                            const track = tracks[i];
+                                            track.enabled = track.language === t.language;
                                         }
                                     }
                                 }}
