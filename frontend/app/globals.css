@@ -86,6 +86,10 @@
     @apply flex items-center justify-center w-10 h-10 rounded-full text-text-secondary bg-transparent transition-colors duration-150 hover:bg-surface-2 hover:text-text-primary;
   }
 
+  .carousel-nav-btn {
+    @apply flex items-center justify-center w-8 h-8 rounded-full text-text-secondary bg-surface-2 border border-surface-3 transition-colors duration-150 hover:bg-surface-3 hover:text-text-primary;
+  }
+
   /* Episode row */
   .episode-row {
     @apply flex items-center gap-4 px-4 py-3 rounded-lg transition-colors duration-150 cursor-pointer hover:bg-surface-2;
@@ -110,6 +114,7 @@
     display: -webkit-box;
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 1;
+    line-clamp: 1;
   }
 
   .line-clamp-2 {
@@ -117,6 +122,7 @@
     display: -webkit-box;
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
+    line-clamp: 2;
   }
 
   /* Glass panel used by settings and overlays */
@@ -142,5 +148,18 @@
     100% {
       background-position: -200% 0;
     }
+  }
+
+  /* Hide scrollbar but keep scrollability (for carousels) */
+  .hide-scrollbar {
+    scrollbar-width: none;
+    /* Firefox */
+    -ms-overflow-style: none;
+    /* IE/Edge */
+  }
+
+  .hide-scrollbar::-webkit-scrollbar {
+    display: none;
+    /* Chrome/Safari */
   }
 }
