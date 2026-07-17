@@ -13,9 +13,21 @@ FILE_ID = os.environ["FILE_ID"]
 FILE_NAME = os.environ["FILE_NAME"]
 # Pre-authorized resumable upload URL created by Apps Script (runs as the user,
 # so the upload lands in the user's Drive quota — not the SA's).
-MP4_UPLOAD_URL = os.environ["MP4_UPLOAD_URL"]
+MP4_UPLOAD_URL = os.environ.get("MP4_UPLOAD_URL", "").strip()
 # Optional comma-separated list of pre-authorized SRT upload URLs (index = track index)
 SRT_UPLOAD_URLS = [u for u in os.environ.get("SRT_UPLOAD_URLS", "").split(",") if u.strip()]
+
+if not MP4_UPLOAD_URL:
+    raise SystemExit(
+        "\n\nERROR: MP4_UPLOAD_URL is empty.\n"
+        "This job was dispatched by an OLD version of the Poller that does not\n"
+        "generate pre-authorized upload URLs.\n\n"
+        "ACTION REQUIRED:\n"
+        "  1. Open your Google Apps Script project (script.google.com)\n"
+        "  2. Replace Poller.gs with the new version from .github/workflows/Poller.gs\n"
+        "  3. Save and re-deploy the Apps Script\n"
+        "  4. The next poll will dispatch with a valid MP4_UPLOAD_URL\n"
+    )
 
 # SA credentials — used ONLY for downloading the source MKV and deleting it afterwards.
 # We use a separate key with write scope just for the delete call.
