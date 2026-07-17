@@ -15,6 +15,13 @@ enum TitleType {
   series
 }
 
+enum TranscodeStatus {
+  pending    // MKV detected, not yet transcoded
+  processing // FFmpeg running right now
+  done       // MP4 uploaded, driveFileId points to the MP4
+  error      // Transcode failed
+}
+
 model Title {
   id            String    @id @default(uuid())
   driveFolderId String    @unique
@@ -52,13 +59,15 @@ model Season {
 }
 
 model Episode {
-  id            String          @id @default(uuid())
-  seasonId      String?
-  titleId       String
-  driveFileId   String          @unique
-  name          String
-  order         Int
-  durationSec   Int?
+  id              String           @id @default(uuid())
+  seasonId        String?
+  titleId         String
+  driveFileId     String           @unique
+  mkvFileId       String?          // original MKV Drive file ID (set when MKV detected)
+  name            String
+  order           Int
+  durationSec     Int?
+  transcodeStatus TranscodeStatus? // null = native MP4, pending/processing/done/error = MKV flow
 
   // OMDb / TMDB / IMDb fields
   imdbId        String?

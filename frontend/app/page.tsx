@@ -43,12 +43,22 @@ export default async function HomePage() {
 
     const { movies, series, recentProgress } = await getLibrary();
 
-    // Filter out progress entries where the user has finished (within last 30s)
-    const continueWatching = recentProgress.filter((p) => {
+    // Filter out entries where the user has finished (within last 30s of the end)
+    const filtered = recentProgress.filter((p) => {
         const { positionSec, episode } = p;
         const dur = episode.durationSec;
         if (!dur) return positionSec > 3;
         return positionSec > 3 && positionSec < dur - 30;
+    });
+
+    // Deduplicate by titleId — results are already sorted by updatedAt desc,
+    // so the first entry for each title is always the most-recently watched episode.
+    const seenTitleIds = new Set<string>();
+    const continueWatching = filtered.filter((p) => {
+        const titleId = p.episode.titleId;
+        if (seenTitleIds.has(titleId)) return false;
+        seenTitleIds.add(titleId);
+        return true;
     });
 
     return (

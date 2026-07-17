@@ -4,7 +4,6 @@ import { useRef, useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { saveProgress } from "@/lib/progress";
 import PlayerControls from "./PlayerControls";
-import ResumePrompt from "./ResumePrompt";
 import NextEpisodePrompt from "./NextEpisodePrompt";
 import type {
     Episode,
@@ -29,6 +28,7 @@ interface VideoPlayerProps {
     nextEpisodeId: string | null;
     savedPositionSec: number;
     durationSec: number | null;
+    isNative: boolean;
 }
 
 const PROGRESS_INTERVAL_MS = 10_000;
@@ -40,29 +40,49 @@ export default function VideoPlayer({
     nextEpisodeId,
     savedPositionSec,
     durationSec: _durationSec,
+    isNative,
 }: VideoPlayerProps) {
+    // Reliable duration from the DB (used as fallback when browser reports
+    // Infinity or a tiny fragment duration for fMP4 live streams).
+    const dbDurationSec = _durationSec ?? episode.durationSec ?? 0;
     const router = useRouter();
     const videoRef = useRef<HTMLVideoElement>(null);
+
+    const initialSeek = savedPositionSec > 5 ? savedPositionSec : 0;
 
     // ── UI state ──────────────────────────────────────────────────────────────
     const [showControls, setShowControls] = useState(true);
     const [isPlaying, setIsPlaying] = useState(false);
-    const [currentTime, setCurrentTime] = useState(0);
-    const [duration, setDuration] = useState(0);
-    const [buffered, setBuffered] = useState(0);
+    const [currentTime, setCurrentTime] = useState(initialSeek);
+    // Pre-seed from DB so the progress bar renders correctly before the browser
+    // reports a reliable duration (fMP4 streams start as Infinity).
+    const [duration, setDuration] = useState(dbDurationSec);
+    const [buffered, setBuffered] = useState(initialSeek);
     const [volume, setVolume] = useState(1);
     const [muted, setMuted] = useState(false);
     const [playbackRate, setPlaybackRate] = useState(1);
-    const [showResumePrompt, setShowResumePrompt] = useState(
-        savedPositionSec > 3
-    );
     const [showNextPrompt, setShowNextPrompt] = useState(false);
+    // True until the browser fires 'canplay' — shows a spinner during FFmpeg startup
+    const [isLoading, setIsLoading] = useState(true);
 
     const hideControlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const progressSaveTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
+    // ── Seek offset (server-side seeking for fMP4 streams) ───────────────────
+    // fMP4 piped via empty_moov supports no byte-range seeking.
+    // When the user seeks, we restart the stream with ?start=<seconds> and
+    // track the offset so displayed time = v.currentTime + seekOffset.
+    const seekOffsetRef = useRef(!isNative ? initialSeek : 0); // always in sync, readable inside callbacks
+    const currentTimeRef = useRef(initialSeek); // mirrors currentTime state, readable in effects
+    const seekToTimeRef = useRef<(t: number) => void>(() => { }); // updated below
+
     // ── Stream URL ────────────────────────────────────────────────────────────
-    const streamUrl = `/api/stream/${episode.driveFileId}`;
+    const baseStreamUrl = `/api/stream/${episode.driveFileId}`;
+    const [streamUrl, setStreamUrl] = useState(() => {
+        return (!isNative && initialSeek > 0)
+            ? `${baseStreamUrl}?start=${initialSeek}`
+            : baseStreamUrl;
+    });
 
     // ── Controls auto-hide ────────────────────────────────────────────────────
     const resetHideTimer = useCallback(() => {
@@ -120,8 +140,27 @@ export default function VideoPlayer({
     // Save on unmount / pause
     const saveNow = useCallback(() => {
         const v = videoRef.current;
-        if (v) saveProgress(episode.id, v.currentTime);
+        if (v) saveProgress(episode.id, v.currentTime + seekOffsetRef.current);
     }, [episode.id]);
+
+    // ── Probe duration for MKV/fMP4 streams ──────────────────────────────────
+    // fMP4 streams report Infinity for video.duration. If the DB doesn't have
+    // durationSec stored, we probe it via a lightweight server-side FFmpeg call.
+    useEffect(() => {
+        if (dbDurationSec > 0) return; // already have it from DB
+        let cancelled = false;
+        fetch(`/api/duration/${episode.driveFileId}`)
+            .then((r) => r.json())
+            .then((data: { durationSec: number }) => {
+                if (!cancelled && data.durationSec > 0) {
+                    setDuration(data.durationSec);
+                }
+            })
+            .catch(() => { /* silently ignore — seek bar just stays indeterminate */ });
+        return () => { cancelled = true; };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [episode.driveFileId]);
+
 
     // ── Keyboard shortcuts ────────────────────────────────────────────────────
     useEffect(() => {
@@ -141,11 +180,11 @@ export default function VideoPlayer({
                     break;
                 case "ArrowRight":
                     e.preventDefault();
-                    v!.currentTime = Math.min(v!.currentTime + 10, v!.duration);
+                    seekToTimeRef.current(Math.min(currentTimeRef.current + 10, dbDurationSec || Infinity));
                     break;
                 case "ArrowLeft":
                     e.preventDefault();
-                    v!.currentTime = Math.max(v!.currentTime - 10, 0);
+                    seekToTimeRef.current(Math.max(currentTimeRef.current - 10, 0));
                     break;
                 case "ArrowUp":
                     e.preventDefault();
@@ -179,16 +218,20 @@ export default function VideoPlayer({
     function onTimeUpdate() {
         const v = videoRef.current;
         if (!v) return;
-        setCurrentTime(v.currentTime);
+        const effective = v.currentTime + seekOffsetRef.current;
+        currentTimeRef.current = effective;
+        setCurrentTime(effective);
 
-        // Update buffered end
+        // Update buffered end (offset-corrected)
         if (v.buffered.length > 0) {
-            setBuffered(v.buffered.end(v.buffered.length - 1));
+            setBuffered(v.buffered.end(v.buffered.length - 1) + seekOffsetRef.current);
         }
 
-        // "Next Episode" prompt logic: show in last 15s if next episode exists
-        const remaining = v.duration - v.currentTime;
-        if (nextEpisodeId && remaining <= 15 && remaining > 0 && !showNextPrompt) {
+        // "Next Episode" prompt — use the `duration` state (populated from DB or
+        // from the probe endpoint). NEVER use v.duration for fMP4 streams — it
+        // only reflects how much has buffered, not the total episode length.
+        const remaining = duration - effective;
+        if (nextEpisodeId && duration > 60 && remaining <= 15 && remaining > 0 && !showNextPrompt) {
             setShowNextPrompt(true);
         }
     }
@@ -196,13 +239,24 @@ export default function VideoPlayer({
     function onLoadedMetadata() {
         const v = videoRef.current;
         if (!v) return;
-        setDuration(v.duration);
+        // Only override our DB-seeded duration if the browser reports a finite,
+        // trustworthy value (fMP4 streams initially report Infinity).
+        if (isFinite(v.duration) && v.duration > 30) {
+            setDuration(v.duration);
+        }
         v.volume = volume;
 
-        // If not showing resume prompt, start from beginning
-        if (!showResumePrompt) {
-            v.play().catch(() => { });
+        // Auto-seek to saved position (only needed for native MP4s, 
+        // MKVs already requested the ?start offset in the src URL)
+        if (isNative && initialSeek > 0 && v.currentTime < 1) {
+            v.currentTime = initialSeek;
         }
+
+        v.play().catch(() => { });
+    }
+
+    function onCanPlay() {
+        setIsLoading(false);
     }
 
     function onPlay() {
@@ -217,6 +271,9 @@ export default function VideoPlayer({
     }
 
     function onEnded() {
+        // Guard: ignore false-positive 'ended' fired on tiny fMP4 fragments.
+        // currentTime is offset-corrected so < 30 means it truly just started.
+        if (currentTime < 30) return;
         saveNow();
         if (nextEpisodeId) {
             router.push(`/player/${nextEpisodeId}`);
@@ -225,39 +282,51 @@ export default function VideoPlayer({
         }
     }
 
-    // Ignore MEDIA_ERR_ABORTED (code 1) — fires when browser cancels the fetch
-    // on seek / navigation / unmount. All other errors are logged.
+    // MEDIA_ERR_ABORTED (1) — browser cancelled fetch on seek/unmount, ignore.
+    // MEDIA_ERR_DECODE   (3) — unexpected here since MKV is now handled server-
+    //                          side, but log it in case of other codec issues.
     function onVideoError() {
         const v = videoRef.current;
         if (!v || !v.error) return;
-        if (v.error.code === MediaError.MEDIA_ERR_ABORTED) return; // expected, ignore
+        if (v.error.code === MediaError.MEDIA_ERR_ABORTED) return;
         console.error("[player] video error", v.error.code, v.error.message);
     }
 
-    // ── Resume prompt handlers ────────────────────────────────────────────────
-    function handleResume() {
+    // ── Seek ──────────────────────────────────────────────────────────────────
+    // For native MP4s (isNative=true), we simply use standard HTML5 Seeking. The browser
+    // does HTTP Range requests automatically — instant and no reloading needed.
+    // For MKV on-the-fly streaming (isNative=false), it's a live fMP4 pipe. There is
+    // no fast seeking natively, so we pass ?start=X to the backend to restart the FFmpeg pipe.
+    function seekToTime(time: number) {
         const v = videoRef.current;
-        if (v) {
-            v.currentTime = savedPositionSec;
-            v.play().catch(() => { });
-        }
-        setShowResumePrompt(false);
-    }
+        if (!v) return;
 
-    function handleStartOver() {
-        const v = videoRef.current;
-        if (v) {
-            v.currentTime = 0;
-            v.play().catch(() => { });
-        }
-        setShowResumePrompt(false);
-    }
+        const targetSec = Math.max(0, Math.floor(time));
 
-    // ── Seek handler ──────────────────────────────────────────────────────────
+        if (isNative) {
+            v.currentTime = targetSec;
+            currentTimeRef.current = targetSec;
+            setCurrentTime(targetSec);
+            return; // done, client-side seek
+        }
+
+        // --- Server-side seek fallback for un-transcoded MKVs ---
+        seekOffsetRef.current = targetSec;
+        currentTimeRef.current = targetSec;
+        setCurrentTime(targetSec); // optimistic update
+        setBuffered(targetSec);
+        setIsLoading(true);
+        const newUrl = targetSec > 0
+            ? `${baseStreamUrl}?start=${targetSec}`
+            : baseStreamUrl;
+        setStreamUrl(newUrl);
+    }
+    // Keep seekToTimeRef current so keyboard effect can always call the latest version
+    seekToTimeRef.current = seekToTime;
+
+    // ── Seek handler (called by progress bar drag) ────────────────────────────
     function seek(time: number) {
-        const v = videoRef.current;
-        if (v) v.currentTime = time;
-        setCurrentTime(time);
+        seekToTime(time);
     }
 
     // ── Playback speed ────────────────────────────────────────────────────────
@@ -276,17 +345,11 @@ export default function VideoPlayer({
 
     // ── Skip ±10s ─────────────────────────────────────────────────────────────
     function skipBack() {
-        const v = videoRef.current;
-        if (!v) return;
-        v.currentTime = Math.max(v.currentTime - 10, 0);
-        setCurrentTime(v.currentTime);
+        seekToTime(Math.max(currentTime - 10, 0));
     }
 
     function skipForward() {
-        const v = videoRef.current;
-        if (!v) return;
-        v.currentTime = Math.min(v.currentTime + 10, v.duration || Infinity);
-        setCurrentTime(v.currentTime);
+        seekToTime(Math.min(currentTime + 10, dbDurationSec || Infinity));
     }
 
     // ── Toggle mute ───────────────────────────────────────────────────────────
@@ -342,12 +405,10 @@ export default function VideoPlayer({
         navigator.mediaSession.setActionHandler("play", () => videoRef.current?.play());
         navigator.mediaSession.setActionHandler("pause", () => videoRef.current?.pause());
         navigator.mediaSession.setActionHandler("seekbackward", () => {
-            const v = videoRef.current;
-            if (v) { v.currentTime = Math.max(v.currentTime - 10, 0); setCurrentTime(v.currentTime); }
+            seekToTime(Math.max(currentTime - 10, 0));
         });
         navigator.mediaSession.setActionHandler("seekforward", () => {
-            const v = videoRef.current;
-            if (v) { v.currentTime = Math.min(v.currentTime + 10, v.duration || Infinity); setCurrentTime(v.currentTime); }
+            seekToTime(Math.min(currentTime + 10, dbDurationSec || Infinity));
         });
         navigator.mediaSession.setActionHandler("previoustrack",
             prevEpisodeId ? () => router.push(`/player/${prevEpisodeId}`) : null
@@ -378,6 +439,13 @@ export default function VideoPlayer({
             onTouchStart={resetHideTimer}
             style={{ cursor: showControls ? "default" : "none" }}
         >
+            {/* ── Loading spinner (visible while FFmpeg starts up) ──────────── */}
+            {isLoading && (
+                <div className="absolute inset-0 z-40 flex flex-col items-center justify-center gap-4 bg-black/60 backdrop-blur-sm pointer-events-none">
+                    <div className="h-14 w-14 animate-spin rounded-full border-4 border-white/20 border-t-white" />
+                    <p className="text-sm font-medium text-white/60 tracking-wide">Preparing video…</p>
+                </div>
+            )}
             {/* ── Video element ─────────────────────────────────────────────────── */}
             <video
                 ref={videoRef}
@@ -385,6 +453,7 @@ export default function VideoPlayer({
                 src={streamUrl}
                 onTimeUpdate={onTimeUpdate}
                 onLoadedMetadata={onLoadedMetadata}
+                onCanPlay={onCanPlay}
                 onPlay={onPlay}
                 onPause={onPause}
                 onEnded={onEnded}
@@ -404,15 +473,6 @@ export default function VideoPlayer({
                 ))}
             </video>
 
-            {/* ── Resume prompt ────────────────────────────────────────────────── */}
-            {showResumePrompt && (
-                <ResumePrompt
-                    positionSec={savedPositionSec}
-                    onResume={handleResume}
-                    onStartOver={handleStartOver}
-                />
-            )}
-
             {/* ── Next Episode prompt ───────────────────────────────────────────── */}
             {showNextPrompt && nextEpisodeId && (
                 <NextEpisodePrompt
@@ -424,7 +484,7 @@ export default function VideoPlayer({
 
             {/* ── Controls overlay ─────────────────────────────────────────────── */}
             <div
-                className={`absolute inset-0 transition-opacity duration-200 ${showControls ? "opacity-100" : "opacity-0 pointer-events-none"
+                className={`absolute inset-0 z-50 transition-opacity duration-200 ${showControls ? "opacity-100" : "opacity-0 pointer-events-none"
                     }`}
                 onClick={togglePlay}
             >
@@ -453,6 +513,7 @@ export default function VideoPlayer({
                     onPrev={() => prevEpisodeId && router.push(`/player/${prevEpisodeId}`)}
                     onNext={() => nextEpisodeId && router.push(`/player/${nextEpisodeId}`)}
                     onBack={() => router.back()}
+                    onHome={() => router.push("/")}
                     videoRef={videoRef}
                 />
             </div>

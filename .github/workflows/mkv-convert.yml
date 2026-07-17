@@ -1,0 +1,33 @@
+name: Convert MKV to MP4
+
+on:
+  repository_dispatch:
+    types: [convert_mkv]
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install Python deps
+        run: pip install google-api-python-client google-auth google-auth-httplib2
+
+      - name: Write service account key
+        run: echo '${{ secrets.GDRIVE_SA_KEY }}' > sa_key.json
+
+      - name: Run conversion
+        env:
+          FILE_ID: ${{ github.event.client_payload.file_id }}
+          FILE_NAME: ${{ github.event.client_payload.file_name }}
+          PARENT_ID: ${{ github.event.client_payload.parent_id }}
+        run: python .github/workflows/convert.py
+
+      - name: Cleanup
+        if: always()
+        run: rm -f sa_key.json *.mkv *.mp4 *.srt

@@ -12,6 +12,7 @@ interface PosterCardProps {
     /** Progress 0-1 for the continue-watching bar */
     progress?: number;
     targetHref?: string;
+    onRemove?: () => void;
 }
 
 export default function PosterCard({
@@ -21,13 +22,14 @@ export default function PosterCard({
     posterUrl,
     progress,
     targetHref,
+    onRemove,
 }: PosterCardProps) {
     const router = useRouter();
     const href = targetHref ?? `/title/${id}`;
 
     return (
         <article
-            className="poster-card focus-visible:ring-2 focus-visible:ring-accent"
+            className="group poster-card focus-visible:ring-2 focus-visible:ring-accent"
             role="button"
             tabIndex={0}
             aria-label={`Play ${name}`}
@@ -55,6 +57,23 @@ export default function PosterCard({
 
             {/* Hover overlay */}
             <div className="poster-card-overlay">
+                {/* Remove button (top right) */}
+                {onRemove && (
+                    <button
+                        className="absolute top-2 right-2 p-1.5 opacity-0 group-hover:opacity-100 transition-opacity bg-black/60 rounded-full hover:bg-black/90 pointer-events-auto z-10"
+                        onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            onRemove();
+                        }}
+                        aria-label="Remove from list"
+                    >
+                        <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                    </button>
+                )}
+
                 {/* Play icon */}
                 <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-150 pointer-events-none">
                     <div className="w-12 h-12 rounded-full bg-white/20 backdrop-blur-sm flex items-center justify-center">

@@ -224,6 +224,19 @@ export default function HomeGrid({ movies, series, continueWatching }: HomeGridP
     const [refreshing, startRefresh] = useTransition();
     const [refreshStatus, setRefreshStatus] = useState<null | "ok" | "error">(null);
     const [query, setQuery] = useState("");
+    const [removedProgress, setRemovedProgress] = useState<Set<string>>(new Set());
+
+    async function handleRemoveProgress(episodeId: string) {
+        // Optimistic UI update
+        const next = new Set(removedProgress);
+        next.add(episodeId);
+        setRemovedProgress(next);
+
+        try {
+            await fetch(`/api/progress?episodeId=${episodeId}`, { method: "DELETE" });
+            router.refresh();
+        } catch { } // ignore on fail
+    }
 
     async function handleRefreshLibrary() {
         startRefresh(async () => {
@@ -242,7 +255,7 @@ export default function HomeGrid({ movies, series, continueWatching }: HomeGridP
     // Use this when posters/names are wrong from a previous bad scan.
     const [forceRefreshing, setForceRefreshing] = useState(false);
     async function handleForceRefresh() {
-        if (!confirm("This will clear all cached posters and re-fetch metadata from scratch. Continue?")) return;
+        if (!confirm("This will clear all cached metadata and re-fetch from scratch. Continue?")) return;
         setForceRefreshing(true);
         try {
             // 1. Clear metadata
@@ -257,6 +270,7 @@ export default function HomeGrid({ movies, series, continueWatching }: HomeGridP
         setForceRefreshing(false);
         setTimeout(() => setRefreshStatus(null), 3000);
     }
+
 
     const q = query.trim().toLowerCase();
     const filteredMovies = q ? movies.filter((m) => m.name.toLowerCase().includes(q)) : movies;
@@ -332,6 +346,7 @@ export default function HomeGrid({ movies, series, continueWatching }: HomeGridP
                         </span>
                     </button>
 
+
                     <button
                         id="btn-sign-out"
                         onClick={() => signOut(() => router.push("/sign-in"))}
@@ -355,7 +370,7 @@ export default function HomeGrid({ movies, series, continueWatching }: HomeGridP
             <RowCarousel
                 sectionId="continue"
                 label="Continue Watching"
-                items={filteredContinue.map((item) => {
+                items={filteredContinue.filter(c => !removedProgress.has(c.episode.id)).map((item) => {
                     const { episode, positionSec } = item;
                     const prog = episode.durationSec ? (positionSec ?? 0) / episode.durationSec : 0;
                     return (
@@ -370,6 +385,7 @@ export default function HomeGrid({ movies, series, continueWatching }: HomeGridP
                             posterUrl={episode.title.posterUrl}
                             progress={prog}
                             targetHref={`/player/${episode.id}`}
+                            onRemove={() => handleRemoveProgress(episode.id)}
                         />
                     );
                 })}
@@ -403,6 +419,8 @@ export default function HomeGrid({ movies, series, continueWatching }: HomeGridP
                     </p>
                 </div>
             )}
+
+
         </div>
     );
 }

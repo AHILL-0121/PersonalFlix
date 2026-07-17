@@ -30,3 +30,9 @@ Thumbs.db
 
 *.md
 !README.md
+
+# GitHub Actions / conversion pipeline — never commit these
+sa_key.json
+input.mkv
+output.mp4
+sub_*.srt

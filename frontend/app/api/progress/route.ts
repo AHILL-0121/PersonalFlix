@@ -40,3 +40,21 @@ export async function POST(req: Request) {
 
     return NextResponse.json(record);
 }
+
+// DELETE /api/progress?episodeId=...
+export async function DELETE(req: Request) {
+    const { userId } = auth();
+    if (!userId)
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+    const { searchParams } = new URL(req.url);
+    const episodeId = searchParams.get("episodeId");
+    if (!episodeId)
+        return NextResponse.json({ error: "episodeId required" }, { status: 400 });
+
+    try {
+        await db.watchProgress.delete({ where: { episodeId } });
+    } catch { }
+
+    return NextResponse.json({ success: true });
+}

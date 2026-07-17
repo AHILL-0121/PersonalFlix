@@ -13,6 +13,7 @@ import {
     Maximize,
     PictureInPicture2,
     ArrowLeft,
+    Home,
     Settings,
 } from "lucide-react";
 import SeekBar from "./SeekBar";
@@ -52,6 +53,7 @@ interface PlayerControlsProps {
     onPrev(): void;
     onNext(): void;
     onBack(): void;
+    onHome(): void;
     videoRef: RefObject<HTMLVideoElement>;
 }
 
@@ -80,6 +82,7 @@ export default function PlayerControls({
     onPrev,
     onNext,
     onBack,
+    onHome,
     videoRef,
 }: PlayerControlsProps) {
     const [showSettings, setShowSettings] = useState(false);
@@ -104,6 +107,14 @@ export default function PlayerControls({
                     aria-label="Back"
                 >
                     <ArrowLeft className="w-5 h-5" />
+                </button>
+                <button
+                    id="btn-player-home"
+                    onClick={(e) => { e.stopPropagation(); onHome(); }}
+                    className="btn-icon"
+                    aria-label="Go to library"
+                >
+                    <Home className="w-5 h-5" />
                 </button>
                 <span className="text-sm text-text-secondary truncate select-none">
                     {title}

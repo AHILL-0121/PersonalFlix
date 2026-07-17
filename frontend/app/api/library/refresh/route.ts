@@ -274,7 +274,7 @@ export async function POST() {
 
         // ── Pre-load existing episodes for the same reason ───────────────────────
         const existingEpisodes = await db.episode.findMany({
-            select: { driveFileId: true, thumbnailUrl: true },
+            select: { driveFileId: true, thumbnailUrl: true, transcodeStatus: true },
         });
         const existingEpMap = new Map(existingEpisodes.map(e => [e.driveFileId, e]));
 
@@ -338,14 +338,26 @@ export async function POST() {
                             const f = videoFiles[i];
                             if (!f.id || !f.name) continue;
 
+                            const isMkv = (f.mimeType?.includes("matroska") || f.mimeType?.includes("mkv") || f.name?.toLowerCase().endsWith(".mkv")) ?? false;
+                            // Only stamp pending for NEW rows or rows that haven't been
+                            // queued yet (transcodeStatus = null). Never downgrade done→pending.
+                            const existingStatus = existingEpMap.get(f.id) as any;
+                            const shouldSetPending = isMkv && !existingStatus?.transcodeStatus;
+
                             await db.episode.upsert({
                                 where: { driveFileId: f.id },
-                                update: { name: title.name, order: i + 1, titleId: title.id },
+                                update: {
+                                    name: title.name,
+                                    order: i + 1,
+                                    titleId: title.id,
+                                    ...(shouldSetPending ? { mkvFileId: f.id, transcodeStatus: "pending" } : {}),
+                                },
                                 create: {
                                     driveFileId: f.id,
                                     name: title.name,
                                     order: i + 1,
                                     titleId: title.id,
+                                    ...(isMkv ? { mkvFileId: f.id, transcodeStatus: "pending" } : {}),
                                 },
                             });
                             localProcessed++;
@@ -382,23 +394,29 @@ export async function POST() {
                                     ? await fetchMetadataEpisode(title.name, title.tmdbId, seasonNumber, ei + 1)
                                     : null;
 
+                                const isMkv = (ef.mimeType?.includes("matroska") || ef.mimeType?.includes("mkv") || ef.name?.toLowerCase().endsWith(".mkv")) ?? false;
+                                const existingStatus = existingEpMap.get(ef.id) as any;
+                                const shouldSetPending = isMkv && !existingStatus?.transcodeStatus;
+
                                 const fallbackName = `Episode ${ei + 1}`;
                                 await db.episode.upsert({
                                     where: { driveFileId: ef.id },
                                     update: {
-                                        name: fallbackName,
+                                        name: metadataEp?.name ?? fallbackName,
                                         order: ei + 1,
                                         seasonId: season.id,
                                         titleId: title.id,
                                         ...(metadataEp || {}),
+                                        ...(shouldSetPending && { mkvFileId: ef.id, transcodeStatus: "pending" }),
                                     },
                                     create: {
                                         driveFileId: ef.id,
-                                        name: fallbackName,
+                                        name: metadataEp?.name ?? fallbackName,
                                         order: ei + 1,
                                         seasonId: season.id,
                                         titleId: title.id,
                                         ...(metadataEp || {}),
+                                        ...(isMkv && { mkvFileId: ef.id, transcodeStatus: "pending" }),
                                     },
                                 });
                                 localProcessed++;
