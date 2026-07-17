@@ -17,7 +17,7 @@ export async function getDriveToken(): Promise<string | null> {
         credentials: getCredentials(),
         scopes: ["https://www.googleapis.com/auth/drive.readonly"],
     });
-    return await auth.getAccessToken();
+    return (await auth.getAccessToken()) ?? null;
 }
 
 /**
