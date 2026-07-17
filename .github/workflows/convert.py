@@ -10,6 +10,9 @@ SCOPES = ["https://www.googleapis.com/auth/drive"]
 FILE_ID = os.environ["FILE_ID"]
 FILE_NAME = os.environ["FILE_NAME"]
 PARENT_ID = os.environ["PARENT_ID"]
+# Optional: set this to your Google account email so the uploaded file is
+# transferred to you after upload (workaround for SA storage quota limits).
+OWNER_EMAIL = os.environ.get("OWNER_EMAIL", "")
 
 creds = service_account.Credentials.from_service_account_file("sa_key.json", scopes=SCOPES)
 drive = build("drive", "v3", credentials=creds)
@@ -109,20 +112,49 @@ if result.returncode != 0:
     ]
     subprocess.run(cmd, check=True)
 
+def transfer_ownership(file_id, owner_email):
+    """Transfer file ownership to owner_email so the SA doesn't hold quota."""
+    try:
+        drive.permissions().create(
+            fileId=file_id,
+            transferOwnership=True,
+            supportsAllDrives=True,
+            body={"role": "owner", "type": "user", "emailAddress": owner_email},
+        ).execute()
+        print(f"  Ownership of {file_id} transferred to {owner_email}")
+    except Exception as e:
+        print(f"  Warning: could not transfer ownership of {file_id}: {e}")
+
+
 # 3. Upload the mp4 to the same parent folder
 print("Uploading converted file")
 file_metadata = {"name": f"{base_name}.mp4", "parents": [PARENT_ID]}
 media = MediaFileUpload(local_mp4, mimetype="video/mp4", resumable=True)
-uploaded = drive.files().create(body=file_metadata, media_body=media, fields="id").execute()
+uploaded = drive.files().create(
+    body=file_metadata,
+    media_body=media,
+    fields="id",
+    supportsAllDrives=True,
+).execute()
 print(f"Uploaded as {uploaded['id']}")
+
+if OWNER_EMAIL:
+    transfer_ownership(uploaded["id"], OWNER_EMAIL)
 
 # 3b. Upload any sidecar srt files alongside it
 for local_srt, drive_name in sidecar_srt_files:
     srt_metadata = {"name": drive_name, "parents": [PARENT_ID]}
     srt_media = MediaFileUpload(local_srt, mimetype="application/x-subrip", resumable=False)
-    srt_uploaded = drive.files().create(body=srt_metadata, media_body=srt_media, fields="id").execute()
+    srt_uploaded = drive.files().create(
+        body=srt_metadata,
+        media_body=srt_media,
+        fields="id",
+        supportsAllDrives=True,
+    ).execute()
     print(f"Uploaded sidecar {drive_name} as {srt_uploaded['id']}")
+    if OWNER_EMAIL:
+        transfer_ownership(srt_uploaded["id"], OWNER_EMAIL)
 
 # 4. Delete the original mkv
-drive.files().delete(fileId=FILE_ID).execute()
+drive.files().delete(fileId=FILE_ID, supportsAllDrives=True).execute()
 print(f"Deleted original {FILE_ID}")

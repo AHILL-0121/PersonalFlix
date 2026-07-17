@@ -26,6 +26,7 @@ jobs:
           FILE_ID: ${{ github.event.client_payload.file_id }}
           FILE_NAME: ${{ github.event.client_payload.file_name }}
           PARENT_ID: ${{ github.event.client_payload.parent_id }}
+          OWNER_EMAIL: ${{ secrets.GDRIVE_OWNER_EMAIL }}
         run: python .github/workflows/convert.py
 
       - name: Cleanup
