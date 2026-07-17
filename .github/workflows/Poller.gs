@@ -12,7 +12,6 @@ function pollForMkvFiles() {
 
   for (const folderId of folderIds) {
     const folder = DriveApp.getFolderById(folderId);
-    const files = folder.getFilesByType(MimeType.MPEG); // fallback filter below is stricter
     const it = folder.getFiles();
     while (it.hasNext()) {
       const file = it.next();
