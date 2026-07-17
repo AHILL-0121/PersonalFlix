@@ -22,6 +22,74 @@ function parseFolderName(raw: string): { cleanName: string; year: number | null 
     return { cleanName: raw.trim(), year: null };
 }
 
+/**
+ * Parse episode metadata directly from a filename.
+ *
+ * Handles patterns like:
+ *   "S01E01 A Night at the Katz Motel-Cajun Granny Stew.mkv"
+ *   "S1E1 - Title One & Title Two.mp4"
+ *   "1x01 Some Title.mkv"
+ *
+ * When a filename contains a season+episode code, the name is extracted from
+ * the rest of the filename (stripped of the code and extension).  Any
+ * separator between the two halves of a combined title (" - ", "/", "&") is
+ * normalised to " / " for readability.
+ *
+ * Returns null if the filename does not contain a recognisable S##E## or
+ * ##x## pattern — in that case fall back to the regular sort-order logic.
+ */
+function parseEpisodeFilename(filename: string): {
+    seasonNumber: number;
+    episodeNumber: number;
+    episodeName: string;
+} | null {
+    // Strip extension
+    const base = filename.replace(/\.[^.]+$/, "");
+
+    // Pattern 1: S01E01 or S1E1 (optionally followed by separator)
+    const seMatch = base.match(/^[Ss](\d{1,2})[Ee](\d{1,3})\s*[-–_.]?\s*(.*)$/);
+    if (seMatch) {
+        const name = normaliseEpisodeName(seMatch[3]);
+        return {
+            seasonNumber: parseInt(seMatch[1], 10),
+            episodeNumber: parseInt(seMatch[2], 10),
+            episodeName: name || base,
+        };
+    }
+
+    // Pattern 2: 1x01 style
+    const xMatch = base.match(/^(\d{1,2})x(\d{1,3})\s*[-–_.]?\s*(.*)$/i);
+    if (xMatch) {
+        const name = normaliseEpisodeName(xMatch[3]);
+        return {
+            seasonNumber: parseInt(xMatch[1], 10),
+            episodeNumber: parseInt(xMatch[2], 10),
+            episodeName: name || base,
+        };
+    }
+
+    return null;
+}
+
+/**
+ * Clean up the title portion of a filename:
+ *  - Trim whitespace
+ *  - Normalise combined-episode separators to " / "
+ *    Recognised separators: slash, ampersand, hyphen flanked by spaces,
+ *    "and" flanked by spaces.
+ */
+function normaliseEpisodeName(raw: string): string {
+    return raw
+        .trim()
+        // Replace common combined-title separators with " / "
+        .replace(/\s*\/\s*/g, " / ")
+        .replace(/\s+&\s+/g, " / ")
+        .replace(/\s+-\s+/g, " / ")
+        // Remove trailing/leading separators
+        .replace(/^\s*\/\s*|\s*\/\s*$/g, "")
+        .trim();
+}
+
 async function fetchTmdbInfo(titleName: string, type: "movie" | "series") {
     const apiKey = process.env.TMDB_API_KEY;
     if (!apiKey) return null;
@@ -387,23 +455,41 @@ export async function POST() {
                                 const ef = episodeFiles[ei];
                                 if (!ef.id || !ef.name) continue;
 
-                                // Only fetch episode metadata if the episode has no thumbnail yet
-                                const existingEp = existingEpMap.get(ef.id);
-                                const needsEpMeta = !existingEp?.thumbnailUrl;
-                                const metadataEp = needsEpMeta
-                                    ? await fetchMetadataEpisode(title.name, title.tmdbId, seasonNumber, ei + 1)
-                                    : null;
+                                // ── Exception: "Courage the Cowardly Dog" uses combined ─────────
+                                // episode titles (e.g. "A Night at the Katz Motel/Cajun Granny
+                                // Stew") per file. Parse the name + episode number directly from
+                                // the filename; skip TMDB/OMDB entirely for this show.
+                                const isCombinedTitleShow = /courage[\s_-]*the[\s_-]*cowardly[\s_-]*dog/i.test(title.name);
+                                const parsedEp = isCombinedTitleShow ? parseEpisodeFilename(ef.name) : null;
+
+                                let resolvedOrder: number;
+                                let resolvedName: string;
+                                let metadataEp: { name?: string; thumbnailUrl?: string | null; overview?: string | null } | null = null;
+
+                                if (parsedEp) {
+                                    // Filename-encoded S##E## — trust it, no API call needed
+                                    resolvedOrder = parsedEp.episodeNumber;
+                                    resolvedName = parsedEp.episodeName || `Episode ${parsedEp.episodeNumber}`;
+                                } else {
+                                    // All other shows — sort-order + TMDB/OMDB as normal
+                                    resolvedOrder = ei + 1;
+                                    const existingEp = existingEpMap.get(ef.id);
+                                    const needsEpMeta = !existingEp?.thumbnailUrl;
+                                    metadataEp = needsEpMeta
+                                        ? await fetchMetadataEpisode(title.name, title.tmdbId, seasonNumber, ei + 1)
+                                        : null;
+                                    resolvedName = metadataEp?.name ?? `Episode ${ei + 1}`;
+                                }
 
                                 const isMkv = (ef.mimeType?.includes("matroska") || ef.mimeType?.includes("mkv") || ef.name?.toLowerCase().endsWith(".mkv")) ?? false;
                                 const existingStatus = existingEpMap.get(ef.id) as any;
                                 const shouldSetPending = isMkv && !existingStatus?.transcodeStatus;
 
-                                const fallbackName = `Episode ${ei + 1}`;
                                 await db.episode.upsert({
                                     where: { driveFileId: ef.id },
                                     update: {
-                                        name: metadataEp?.name ?? fallbackName,
-                                        order: ei + 1,
+                                        name: resolvedName,
+                                        order: resolvedOrder,
                                         seasonId: season.id,
                                         titleId: title.id,
                                         ...(metadataEp || {}),
@@ -411,8 +497,8 @@ export async function POST() {
                                     },
                                     create: {
                                         driveFileId: ef.id,
-                                        name: metadataEp?.name ?? fallbackName,
-                                        order: ei + 1,
+                                        name: resolvedName,
+                                        order: resolvedOrder,
                                         seasonId: season.id,
                                         titleId: title.id,
                                         ...(metadataEp || {}),
