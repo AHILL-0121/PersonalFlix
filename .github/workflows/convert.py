@@ -134,6 +134,13 @@ if sidecar_srt_files:
         "uploaded via the SA. Re-upload them manually or extend the Poller to create SRT placeholders."
     )
 
-# ── 5. Delete the original MKV (metadata op — no quota needed) ───────────────
-drive.files().delete(fileId=FILE_ID, supportsAllDrives=True).execute()
-print(f"Deleted original MKV {FILE_ID}")
+# ── 5. Trash the original MKV ────────────────────────────────────────────────
+# files().delete() requires file OWNERSHIP — the SA doesn't own the MKV (you do).
+# files().update(trashed=True) only requires editor access, which the SA has.
+drive.files().update(
+    fileId=FILE_ID,
+    body={"trashed": True},
+    supportsAllDrives=True,
+    fields="id",
+).execute()
+print(f"Trashed original MKV {FILE_ID}")
