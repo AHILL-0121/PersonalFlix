@@ -455,23 +455,22 @@ export async function POST() {
                                 const ef = episodeFiles[ei];
                                 if (!ef.id || !ef.name) continue;
 
-                                // ── Exception: "Courage the Cowardly Dog" uses combined ─────────
-                                // episode titles (e.g. "A Night at the Katz Motel/Cajun Granny
-                                // Stew") per file. Parse the name + episode number directly from
-                                // the filename; skip TMDB/OMDB entirely for this show.
-                                const isCombinedTitleShow = /courage[\s_-]*the[\s_-]*cowardly[\s_-]*dog/i.test(title.name);
-                                const parsedEp = isCombinedTitleShow ? parseEpisodeFilename(ef.name) : null;
+                                // ── Try to parse S##E## + title directly from the filename ──────
+                                // When a filename encodes the episode number (e.g. shows with
+                                // combined dual-episode titles like Courage the Cowardly Dog),
+                                // use those values and skip the TMDB/OMDB lookup entirely.
+                                const parsedEp = parseEpisodeFilename(ef.name);
 
                                 let resolvedOrder: number;
                                 let resolvedName: string;
                                 let metadataEp: { name?: string; thumbnailUrl?: string | null; overview?: string | null } | null = null;
 
                                 if (parsedEp) {
-                                    // Filename-encoded S##E## — trust it, no API call needed
+                                    // Filename has S##E## — trust it completely, no API call needed
                                     resolvedOrder = parsedEp.episodeNumber;
                                     resolvedName = parsedEp.episodeName || `Episode ${parsedEp.episodeNumber}`;
                                 } else {
-                                    // All other shows — sort-order + TMDB/OMDB as normal
+                                    // No filename encoding — fall back to sort-order + TMDB/OMDB
                                     resolvedOrder = ei + 1;
                                     const existingEp = existingEpMap.get(ef.id);
                                     const needsEpMeta = !existingEp?.thumbnailUrl;
