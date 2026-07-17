@@ -42,71 +42,34 @@ function getAllSubfolderIds(rootId) {
 }
 
 /**
- * Create a Google Drive resumable upload session AS THE SCRIPT USER.
- * Returns the upload URL (Location header). The URL is valid for 7 days.
- * Because this runs under the user's OAuth token (ScriptApp.getOAuthToken()),
- * any bytes uploaded to this URL count against the USER's quota — not the
- * service account's (which has zero quota).
+ * Create an empty placeholder file owned by YOUR Google account.
+ * Because you own it, any content the SA writes to it is charged to YOUR
+ * Drive quota — not the SA's (which has zero quota).
  *
- * @param {string} name       - Target filename in Drive (e.g. "Movie.mp4")
- * @param {string} parentId   - Drive folder ID for the uploaded file
- * @param {string} mimeType   - MIME type of the file to be uploaded
- * @returns {string}          - Resumable upload URL
+ * @param {string} name      - Filename (e.g. "Movie.mp4")
+ * @param {string} parentId  - Drive folder ID
+ * @param {string} mimeType  - MIME type string
+ * @returns {string}         - File ID of the created placeholder
  */
-function initiateResumableUpload(name, parentId, mimeType) {
-  const token = ScriptApp.getOAuthToken();
-  const resp = UrlFetchApp.fetch(
-    "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable",
-    {
-      method: "post",
-      headers: {
-        Authorization: "Bearer " + token,
-        "Content-Type": "application/json; charset=UTF-8",
-        "X-Upload-Content-Type": mimeType,
-      },
-      payload: JSON.stringify({ name: name, parents: [parentId] }),
-      muteHttpExceptions: true,
-    }
-  );
-
-  const code = resp.getResponseCode();
-  if (code !== 200) {
-    throw new Error(
-      "Failed to initiate resumable upload for " + name +
-      ": HTTP " + code + " — " + resp.getContentText().substring(0, 300)
-    );
-  }
-
-  const location = resp.getHeaders()["Location"];
-  if (!location) {
-    throw new Error("No Location header in upload initiation response for " + name);
-  }
-  Logger.log("Upload URL created for: " + name);
-  return location;
+function createPlaceholderFile(name, parentId, mimeType) {
+  const folder = DriveApp.getFolderById(parentId);
+  // createFile(name, content, mimeType) — empty string content = zero-byte placeholder
+  const file = folder.createFile(name, "", mimeType);
+  Logger.log("Created placeholder: " + name + " → " + file.getId());
+  return file.getId();
 }
 
 // ==== Trigger GitHub Actions via repository_dispatch ====
 function dispatchConversion(fileId, fileName, parentId) {
   const baseName = fileName.replace(/\.mkv$/i, "");
 
-  // Create a pre-authorized upload session for the converted MP4.
-  // This runs as your Google account, so the file lands in YOUR Drive quota.
-  const mp4UploadUrl = initiateResumableUpload(baseName + ".mp4", parentId, "video/mp4");
-
-  // Pre-create upload slots for up to 3 sidecar SRT subtitle tracks.
-  // Unused slots expire harmlessly after 7 days.
-  const srtUploadUrls = [];
-  for (let i = 0; i < 3; i++) {
-    try {
-      const srtName = i === 0 ? baseName + ".srt" : baseName + ".track" + i + ".srt";
-      srtUploadUrls.push(
-        initiateResumableUpload(srtName, parentId, "application/x-subrip")
-      );
-    } catch (e) {
-      Logger.log("SRT slot " + i + " init failed: " + e);
-      break; // stop attempting further slots if we hit an error
-    }
-  }
+  // Create an empty user-owned placeholder. The SA will overwrite its content
+  // with the converted MP4. Storage charged to you (the file owner), not the SA.
+  const placeholderId = createPlaceholderFile(
+    baseName + ".mp4",
+    parentId,
+    "video/mp4"
+  );
 
   const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/dispatches`;
   const payload = {
@@ -115,8 +78,7 @@ function dispatchConversion(fileId, fileName, parentId) {
       file_id: fileId,
       file_name: fileName,
       parent_id: parentId,
-      mp4_upload_url: mp4UploadUrl,
-      srt_upload_urls: srtUploadUrls.join(","), // comma-separated for easy env var passing
+      placeholder_id: placeholderId,   // SA will UPDATE this file, not CREATE a new one
     },
   };
   const options = {

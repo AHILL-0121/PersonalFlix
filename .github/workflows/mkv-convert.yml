@@ -16,7 +16,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
       - name: Install Python deps
-        run: pip install google-api-python-client google-auth google-auth-httplib2 requests
+        run: pip install google-api-python-client google-auth google-auth-httplib2
 
       - name: Write service account key
         run: echo '${{ secrets.GDRIVE_SA_KEY }}' > sa_key.json
@@ -26,10 +26,9 @@ jobs:
           FILE_ID: ${{ github.event.client_payload.file_id }}
           FILE_NAME: ${{ github.event.client_payload.file_name }}
           PARENT_ID: ${{ github.event.client_payload.parent_id }}
-          # Pre-authorized upload URLs created by Apps Script (run as the user).
-          # Uploading to these URLs counts against the user's Drive quota, not the SA's.
-          MP4_UPLOAD_URL: ${{ github.event.client_payload.mp4_upload_url }}
-          SRT_UPLOAD_URLS: ${{ github.event.client_payload.srt_upload_urls }}
+          # ID of the empty placeholder file created by Apps Script (owned by you).
+          # The SA updates it — quota is charged to you (file owner), not the SA.
+          PLACEHOLDER_ID: ${{ github.event.client_payload.placeholder_id }}
         run: python .github/workflows/convert.py
 
       - name: Cleanup

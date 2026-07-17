@@ -1,82 +1,34 @@
 import os
 import subprocess
 import json
-import math
-import requests
 import io
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
+from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 
-SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]  # SA only needs read to download
+SCOPES = ["https://www.googleapis.com/auth/drive"]
 FILE_ID = os.environ["FILE_ID"]
 FILE_NAME = os.environ["FILE_NAME"]
-# Pre-authorized resumable upload URL created by Apps Script (runs as the user,
-# so the upload lands in the user's Drive quota — not the SA's).
-MP4_UPLOAD_URL = os.environ.get("MP4_UPLOAD_URL", "").strip()
-# Optional comma-separated list of pre-authorized SRT upload URLs (index = track index)
-SRT_UPLOAD_URLS = [u for u in os.environ.get("SRT_UPLOAD_URLS", "").split(",") if u.strip()]
+# ID of the empty placeholder file created by Apps Script (owned by the user).
+# The SA updates this file's content — quota is charged to the file owner (user), not the SA.
+PLACEHOLDER_ID = os.environ.get("PLACEHOLDER_ID", "").strip()
 
-if not MP4_UPLOAD_URL:
+if not PLACEHOLDER_ID:
     raise SystemExit(
-        "\n\nERROR: MP4_UPLOAD_URL is empty.\n"
-        "This job was dispatched by an OLD version of the Poller that does not\n"
-        "generate pre-authorized upload URLs.\n\n"
+        "\n\nERROR: PLACEHOLDER_ID is empty.\n"
+        "This job was dispatched by an OLD version of the Poller.\n\n"
         "ACTION REQUIRED:\n"
         "  1. Open your Google Apps Script project (script.google.com)\n"
-        "  2. Replace Poller.gs with the new version from .github/workflows/Poller.gs\n"
-        "  3. Save and re-deploy the Apps Script\n"
-        "  4. The next poll will dispatch with a valid MP4_UPLOAD_URL\n"
+        "  2. Replace the script with the latest Poller.gs from .github/workflows/Poller.gs\n"
+        "  3. Save — the next poll will dispatch with a valid PLACEHOLDER_ID\n"
     )
 
-# SA credentials — used ONLY for downloading the source MKV and deleting it afterwards.
-# We use a separate key with write scope just for the delete call.
-_sa_creds_ro = service_account.Credentials.from_service_account_file(
-    "sa_key.json", scopes=["https://www.googleapis.com/auth/drive"]
-)
-drive = build("drive", "v3", credentials=_sa_creds_ro)
+creds = service_account.Credentials.from_service_account_file("sa_key.json", scopes=SCOPES)
+drive = build("drive", "v3", credentials=creds)
 
 local_mkv = "input.mkv"
 local_mp4 = "output.mp4"
 base_name = os.path.splitext(FILE_NAME)[0]
-
-CHUNK = 50 * 1024 * 1024  # 50 MB upload chunks
-
-
-def upload_via_resumable_url(upload_url: str, file_path: str, label: str = "file") -> None:
-    """
-    Upload a local file to a Google Drive resumable upload URL.
-    The session was initiated by the user's Apps Script, so quota is charged
-    to the user's Google account — not the service account.
-    """
-    size = os.path.getsize(file_path)
-    print(f"  Uploading {label} ({size / (1024 ** 2):.1f} MB) in {math.ceil(size / CHUNK)} chunk(s)")
-    uploaded = 0
-    with open(file_path, "rb") as f:
-        while uploaded < size:
-            chunk = f.read(CHUNK)
-            chunk_len = len(chunk)
-            end = uploaded + chunk_len - 1
-            headers = {
-                "Content-Length": str(chunk_len),
-                "Content-Range": f"bytes {uploaded}-{end}/{size}",
-            }
-            resp = requests.put(upload_url, headers=headers, data=chunk, timeout=600)
-            if resp.status_code in (200, 201):
-                file_id = resp.json().get("id", "?")
-                print(f"  ✓ {label} uploaded. Drive file ID: {file_id}")
-                return
-            elif resp.status_code == 308:
-                # Resume Incomplete — server ACKed up to some byte
-                rng = resp.headers.get("Range", "")
-                uploaded = int(rng.split("-")[1]) + 1 if rng else end + 1
-                print(f"  {uploaded / size * 100:.1f}% uploaded…")
-            else:
-                raise RuntimeError(
-                    f"Upload of {label} failed: HTTP {resp.status_code}\n{resp.text[:500]}"
-                )
-    raise RuntimeError(f"Upload loop for {label} ended without 200/201")
-
 
 # ── 1. Download the MKV ───────────────────────────────────────────────────────
 print(f"Downloading {FILE_NAME} ({FILE_ID})")
@@ -101,7 +53,7 @@ sub_codecs = {s.get("codec_name") for s in sub_streams}
 print(f"Subtitle codecs found: {sub_codecs}")
 
 mp4_incompatible = sub_codecs & {"ass", "ssa", "hdmv_pgs_subtitle", "dvd_subtitle"}
-sidecar_srt_files = []  # list of (local_path, upload_url_index)
+sidecar_srt_files = []  # list of local srt paths (SA can't upload these, so just log)
 
 if not sub_streams:
     cmd = [
@@ -115,14 +67,13 @@ elif mp4_incompatible:
     print("Incompatible subtitle format — extracting sidecar SRT files")
     for idx, s in enumerate(sub_streams):
         stream_index = s["index"]
-        lang = s.get("tags", {}).get("language", f"track{idx}")
         local_srt = f"sub_{idx}.srt"
         res = subprocess.run(
             ["ffmpeg", "-i", local_mkv, "-map", f"0:{stream_index}", local_srt],
             capture_output=True, text=True,
         )
         if res.returncode == 0 and os.path.exists(local_srt):
-            sidecar_srt_files.append((local_srt, idx))
+            sidecar_srt_files.append(local_srt)
         else:
             print(f"  Could not extract track {stream_index} ({s.get('codec_name')}), skipping")
 
@@ -160,17 +111,29 @@ if result.returncode != 0:
     ]
     subprocess.run(cmd, check=True)
 
-# ── 4. Upload MP4 via pre-signed user URL (no SA quota used) ─────────────────
-print("Uploading converted MP4…")
-upload_via_resumable_url(MP4_UPLOAD_URL, local_mp4, label=f"{base_name}.mp4")
+# ── 4. Upload: UPDATE the placeholder file (owned by user → user's quota) ────
+#
+# Key insight: drive.files().update() replaces the CONTENT of an existing file.
+# Google charges storage to the FILE OWNER (the user who created the placeholder
+# in Apps Script). The SA has zero personal quota but can still write *content*
+# to a file it has editor access to — it just can't own storage.
+#
+print(f"Uploading MP4 by updating placeholder {PLACEHOLDER_ID}…")
+media = MediaFileUpload(local_mp4, mimetype="video/mp4", resumable=True)
+drive.files().update(
+    fileId=PLACEHOLDER_ID,
+    media_body=media,
+    supportsAllDrives=True,
+    fields="id,name,size",
+).execute()
+print(f"✓ MP4 uploaded to file ID: {PLACEHOLDER_ID}")
 
-# ── 4b. Upload sidecar SRT files (if upload URLs were provided) ───────────────
-for local_srt, url_idx in sidecar_srt_files:
-    if url_idx < len(SRT_UPLOAD_URLS):
-        upload_via_resumable_url(SRT_UPLOAD_URLS[url_idx], local_srt, label=local_srt)
-    else:
-        print(f"  WARNING: no upload URL for sidecar {local_srt} (url_idx={url_idx}), skipping")
+if sidecar_srt_files:
+    print(
+        f"NOTE: {len(sidecar_srt_files)} SRT sidecar file(s) were extracted but cannot be "
+        "uploaded via the SA. Re-upload them manually or extend the Poller to create SRT placeholders."
+    )
 
-# ── 5. Delete the original MKV using the SA (delete = metadata op, no quota) ─
+# ── 5. Delete the original MKV (metadata op — no quota needed) ───────────────
 drive.files().delete(fileId=FILE_ID, supportsAllDrives=True).execute()
 print(f"Deleted original MKV {FILE_ID}")
