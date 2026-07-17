@@ -1,29 +1,74 @@
 import os
 import subprocess
 import json
+import math
+import requests
+import io
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
-import io
+from googleapiclient.http import MediaIoBaseDownload
 
-SCOPES = ["https://www.googleapis.com/auth/drive"]
+SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]  # SA only needs read to download
 FILE_ID = os.environ["FILE_ID"]
 FILE_NAME = os.environ["FILE_NAME"]
-PARENT_ID = os.environ["PARENT_ID"]
-# Optional: set this to your Google account email so the uploaded file is
-# transferred to you after upload (workaround for SA storage quota limits).
-OWNER_EMAIL = os.environ.get("OWNER_EMAIL", "")
+# Pre-authorized resumable upload URL created by Apps Script (runs as the user,
+# so the upload lands in the user's Drive quota — not the SA's).
+MP4_UPLOAD_URL = os.environ["MP4_UPLOAD_URL"]
+# Optional comma-separated list of pre-authorized SRT upload URLs (index = track index)
+SRT_UPLOAD_URLS = [u for u in os.environ.get("SRT_UPLOAD_URLS", "").split(",") if u.strip()]
 
-creds = service_account.Credentials.from_service_account_file("sa_key.json", scopes=SCOPES)
-drive = build("drive", "v3", credentials=creds)
+# SA credentials — used ONLY for downloading the source MKV and deleting it afterwards.
+# We use a separate key with write scope just for the delete call.
+_sa_creds_ro = service_account.Credentials.from_service_account_file(
+    "sa_key.json", scopes=["https://www.googleapis.com/auth/drive"]
+)
+drive = build("drive", "v3", credentials=_sa_creds_ro)
 
 local_mkv = "input.mkv"
 local_mp4 = "output.mp4"
 base_name = os.path.splitext(FILE_NAME)[0]
 
-# 1. Download the mkv
+CHUNK = 50 * 1024 * 1024  # 50 MB upload chunks
+
+
+def upload_via_resumable_url(upload_url: str, file_path: str, label: str = "file") -> None:
+    """
+    Upload a local file to a Google Drive resumable upload URL.
+    The session was initiated by the user's Apps Script, so quota is charged
+    to the user's Google account — not the service account.
+    """
+    size = os.path.getsize(file_path)
+    print(f"  Uploading {label} ({size / (1024 ** 2):.1f} MB) in {math.ceil(size / CHUNK)} chunk(s)")
+    uploaded = 0
+    with open(file_path, "rb") as f:
+        while uploaded < size:
+            chunk = f.read(CHUNK)
+            chunk_len = len(chunk)
+            end = uploaded + chunk_len - 1
+            headers = {
+                "Content-Length": str(chunk_len),
+                "Content-Range": f"bytes {uploaded}-{end}/{size}",
+            }
+            resp = requests.put(upload_url, headers=headers, data=chunk, timeout=600)
+            if resp.status_code in (200, 201):
+                file_id = resp.json().get("id", "?")
+                print(f"  ✓ {label} uploaded. Drive file ID: {file_id}")
+                return
+            elif resp.status_code == 308:
+                # Resume Incomplete — server ACKed up to some byte
+                rng = resp.headers.get("Range", "")
+                uploaded = int(rng.split("-")[1]) + 1 if rng else end + 1
+                print(f"  {uploaded / size * 100:.1f}% uploaded…")
+            else:
+                raise RuntimeError(
+                    f"Upload of {label} failed: HTTP {resp.status_code}\n{resp.text[:500]}"
+                )
+    raise RuntimeError(f"Upload loop for {label} ended without 200/201")
+
+
+# ── 1. Download the MKV ───────────────────────────────────────────────────────
 print(f"Downloading {FILE_NAME} ({FILE_ID})")
-request = drive.files().get_media(fileId=FILE_ID)
+request = drive.files().get_media(fileId=FILE_ID, supportsAllDrives=True)
 with io.FileIO(local_mkv, "wb") as fh:
     downloader = MediaIoBaseDownload(fh, request)
     done = False
@@ -32,10 +77,10 @@ with io.FileIO(local_mkv, "wb") as fh:
         if status:
             print(f"  {int(status.progress() * 100)}%")
 
-# 2. Inspect streams to decide subtitle handling
+# ── 2. Probe streams ──────────────────────────────────────────────────────────
 probe = subprocess.run(
     ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", local_mkv],
-    capture_output=True, text=True
+    capture_output=True, text=True,
 )
 streams = json.loads(probe.stdout).get("streams", [])
 sub_streams = [s for s in streams if s.get("codec_type") == "subtitle"]
@@ -43,64 +88,55 @@ sub_codecs = {s.get("codec_name") for s in sub_streams}
 
 print(f"Subtitle codecs found: {sub_codecs}")
 
-# mp4 supports mov_text (converted srt) natively. ass/ssa/pgs need special handling.
 mp4_incompatible = sub_codecs & {"ass", "ssa", "hdmv_pgs_subtitle", "dvd_subtitle"}
-
-sidecar_srt_files = []  # list of (local_path, drive_name) to upload alongside the mp4
+sidecar_srt_files = []  # list of (local_path, upload_url_index)
 
 if not sub_streams:
-    # No subtitles, straightforward remux/convert
     cmd = [
         "ffmpeg", "-i", local_mkv,
         "-map", "0:v", "-map", "0:a",
         "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
-        local_mp4
+        local_mp4,
     ]
 elif mp4_incompatible:
-    # Extract each subtitle track as a standalone sidecar srt instead of burning in,
-    # so subtitles stay toggleable in any player that supports external srt.
-    print("Incompatible subtitle format detected, extracting sidecar srt files instead of burning in")
+    print("Incompatible subtitle format — extracting sidecar SRT files")
     for idx, s in enumerate(sub_streams):
         stream_index = s["index"]
         lang = s.get("tags", {}).get("language", f"track{idx}")
-        srt_name = f"{base_name}.{lang}.srt" if len(sub_streams) > 1 else f"{base_name}.srt"
         local_srt = f"sub_{idx}.srt"
-        extract_cmd = [
-            "ffmpeg", "-i", local_mkv,
-            "-map", f"0:{stream_index}",
-            local_srt
-        ]
-        res = subprocess.run(extract_cmd, capture_output=True, text=True)
+        res = subprocess.run(
+            ["ffmpeg", "-i", local_mkv, "-map", f"0:{stream_index}", local_srt],
+            capture_output=True, text=True,
+        )
         if res.returncode == 0 and os.path.exists(local_srt):
-            sidecar_srt_files.append((local_srt, srt_name))
+            sidecar_srt_files.append((local_srt, idx))
         else:
-            print(f"  Could not extract track {stream_index} ({s.get('codec_name')}) as srt, skipping")
+            print(f"  Could not extract track {stream_index} ({s.get('codec_name')}), skipping")
 
-    # Video/audio only, no embedded subtitle track in the mp4 itself
     cmd = [
         "ffmpeg", "-i", local_mkv,
         "-map", "0:v", "-map", "0:a",
         "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
-        local_mp4
+        local_mp4,
     ]
 else:
-    # SRT-compatible subs, mux as soft subtitle track (mov_text)
+    # SRT-compatible: mux as soft subtitle track (mov_text)
     cmd = [
         "ffmpeg", "-i", local_mkv,
         "-map", "0:v", "-map", "0:a", "-map", "0:s?",
         "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
         "-c:s", "mov_text",
         "-movflags", "+faststart",
-        local_mp4
+        local_mp4,
     ]
 
+# ── 3. Convert ───────────────────────────────────────────────────────────────
 print("Running:", " ".join(cmd))
 result = subprocess.run(cmd, capture_output=True, text=True)
 if result.returncode != 0:
     print(result.stderr)
-    # Fallback: if video copy fails (some HEVC/container quirks), re-encode video too
     print("Copy failed, retrying with video re-encode")
     cmd = [
         "ffmpeg", "-i", local_mkv,
@@ -108,53 +144,21 @@ if result.returncode != 0:
         "-c:v", "libx264", "-preset", "medium", "-crf", "20",
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
-        local_mp4
+        local_mp4,
     ]
     subprocess.run(cmd, check=True)
 
-def transfer_ownership(file_id, owner_email):
-    """Transfer file ownership to owner_email so the SA doesn't hold quota."""
-    try:
-        drive.permissions().create(
-            fileId=file_id,
-            transferOwnership=True,
-            supportsAllDrives=True,
-            body={"role": "owner", "type": "user", "emailAddress": owner_email},
-        ).execute()
-        print(f"  Ownership of {file_id} transferred to {owner_email}")
-    except Exception as e:
-        print(f"  Warning: could not transfer ownership of {file_id}: {e}")
+# ── 4. Upload MP4 via pre-signed user URL (no SA quota used) ─────────────────
+print("Uploading converted MP4…")
+upload_via_resumable_url(MP4_UPLOAD_URL, local_mp4, label=f"{base_name}.mp4")
 
+# ── 4b. Upload sidecar SRT files (if upload URLs were provided) ───────────────
+for local_srt, url_idx in sidecar_srt_files:
+    if url_idx < len(SRT_UPLOAD_URLS):
+        upload_via_resumable_url(SRT_UPLOAD_URLS[url_idx], local_srt, label=local_srt)
+    else:
+        print(f"  WARNING: no upload URL for sidecar {local_srt} (url_idx={url_idx}), skipping")
 
-# 3. Upload the mp4 to the same parent folder
-print("Uploading converted file")
-file_metadata = {"name": f"{base_name}.mp4", "parents": [PARENT_ID]}
-media = MediaFileUpload(local_mp4, mimetype="video/mp4", resumable=True)
-uploaded = drive.files().create(
-    body=file_metadata,
-    media_body=media,
-    fields="id",
-    supportsAllDrives=True,
-).execute()
-print(f"Uploaded as {uploaded['id']}")
-
-if OWNER_EMAIL:
-    transfer_ownership(uploaded["id"], OWNER_EMAIL)
-
-# 3b. Upload any sidecar srt files alongside it
-for local_srt, drive_name in sidecar_srt_files:
-    srt_metadata = {"name": drive_name, "parents": [PARENT_ID]}
-    srt_media = MediaFileUpload(local_srt, mimetype="application/x-subrip", resumable=False)
-    srt_uploaded = drive.files().create(
-        body=srt_metadata,
-        media_body=srt_media,
-        fields="id",
-        supportsAllDrives=True,
-    ).execute()
-    print(f"Uploaded sidecar {drive_name} as {srt_uploaded['id']}")
-    if OWNER_EMAIL:
-        transfer_ownership(srt_uploaded["id"], OWNER_EMAIL)
-
-# 4. Delete the original mkv
+# ── 5. Delete the original MKV using the SA (delete = metadata op, no quota) ─
 drive.files().delete(fileId=FILE_ID, supportsAllDrives=True).execute()
-print(f"Deleted original {FILE_ID}")
+print(f"Deleted original MKV {FILE_ID}")
