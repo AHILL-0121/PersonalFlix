@@ -96,14 +96,27 @@
     /* Note: 'group' is added directly on the element className — it cannot be used with @apply */
   }
 
-  /* Player seek bar track */
-  .seek-track {
-    @apply w-full h-1 rounded-full bg-surface-3 relative overflow-hidden cursor-pointer;
-    transition: height 0.15s ease;
+  /* Player ghost icon button — uniform size, hover lift */
+  .player-ghost-btn {
+    @apply flex items-center justify-center w-9 h-9 rounded-full relative text-white/60 hover:text-white hover:bg-white/10 transition-all duration-150 cursor-pointer;
   }
 
-  .seek-track:hover {
-    height: 5px;
+  /* Volume slider — amber thumb */
+  .volume-slider {
+    @apply h-1 rounded-full cursor-pointer;
+    accent-color: #F0A500;
+    appearance: none;
+    background: rgba(255, 255, 255, 0.2);
+  }
+
+  .volume-slider::-webkit-slider-thumb {
+    appearance: none;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #F0A500;
+    cursor: pointer;
+    box-shadow: 0 0 4px #F0A50088;
   }
 }
 
@@ -147,6 +160,23 @@
 
     100% {
       background-position: -200% 0;
+    }
+  }
+
+  /* Episode drawer slide-in from right */
+  .animate-slide-in-right {
+    animation: slideInRight 0.25s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  @keyframes slideInRight {
+    from {
+      transform: translateX(100%);
+      opacity: 0.6;
+    }
+
+    to {
+      transform: translateX(0);
+      opacity: 1;
     }
   }
 

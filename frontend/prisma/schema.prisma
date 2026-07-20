@@ -32,6 +32,7 @@ model Title {
   // OMDb / TMDB / IMDb fields
   imdbId        String?
   tmdbId        Int?
+  tmdbEpisodeSync Boolean @default(false)
   backdropUrl   String?
   overview      String?
   rating        Float?

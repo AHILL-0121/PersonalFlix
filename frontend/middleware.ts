@@ -7,7 +7,7 @@ export default clerkMiddleware((auth, req) => {
     if (!isPublicRoute(req)) {
         auth().protect();
     }
-});
+}, { clockSkewInMs: 1000 * 60 * 60 * 24 }); // 24 hours of skew tolerance
 
 export const config = {
     matcher: [

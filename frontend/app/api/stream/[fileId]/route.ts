@@ -2,16 +2,11 @@ import { auth } from "@clerk/nextjs/server";
 import { spawn } from "child_process";
 import { getDriveClient, getDriveToken } from "@/lib/drive";
 
-// Force Node.js runtime — this route uses child_process and native binaries.
-// The Edge runtime has neither, and webpack would mangle the ffmpeg path.
 export const runtime = "nodejs";
 
-// Use require() at call-time (not import-time) so webpack never resolves or
-// bundles the ffmpeg-static path string. Node will look it up in node_modules.
 function getFfmpegPath(): string {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const p = require("ffmpeg-static") as string | null;
-    if (!p) throw new Error("ffmpeg-static binary not found");
+    const { join } = require("path");
+    const p = join(process.cwd(), "node_modules", "ffmpeg-static", "ffmpeg.exe");
     return p;
 }
 
@@ -19,149 +14,119 @@ interface RouteParams {
     params: { fileId: string };
 }
 
+function getBrowserMime(rawMime: string, fileName: string): string {
+    const name = fileName.toLowerCase();
+    if (name.endsWith(".mkv") || rawMime.includes("matroska") || rawMime.includes("mkv"))
+        return "video/x-matroska";
+    if (name.endsWith(".webm") || rawMime.includes("webm")) return "video/webm";
+    return "video/mp4";
+}
+
 export async function GET(req: Request, { params }: RouteParams) {
     const { userId } = auth();
-    if (!userId)
-        return new Response("Unauthorized", { status: 401 });
+    if (!userId) return new Response("Unauthorized", { status: 401 });
 
+    const url = new URL(req.url);
     const rangeHeader = req.headers.get("range");
+    // ?audioTrack=N selects a specific audio stream index (0-based among audio streams)
+    const audioTrackParam = url.searchParams.get("audioTrack");
+    const audioTrackIdx = audioTrackParam !== null && audioTrackParam !== "undefined" && audioTrackParam !== "null" && audioTrackParam.trim() !== "" ? parseInt(audioTrackParam, 10) : null;
+    const startParam = url.searchParams.get("start");
+    const startOffset = startParam !== null && startParam !== "undefined" && startParam !== "null" && startParam.trim() !== "" ? parseFloat(startParam) : 0;
 
     try {
         const drive = getDriveClient();
 
-        // Fetch file metadata: size, mimeType, name
-        const meta = await drive.files.get(
-            {
-                fileId: params.fileId,
-                fields: "size,mimeType,name",
-                supportsAllDrives: true,
-            }
-        );
+        // ── Step 1: Fetch metadata ────────────────────────────────────────────
+        const meta = await drive.files.get({
+            fileId: params.fileId,
+            fields: "size,mimeType,name",
+            supportsAllDrives: true,
+        });
 
         const rawMime = meta.data.mimeType ?? "video/mp4";
         const fileName = meta.data.name ?? "video";
-        const isMkv = rawMime.includes("matroska") || rawMime.includes("mkv");
+        const fileSize = parseInt(meta.data.size ?? "0", 10);
 
-        // ══════════════════════════════════════════════════════════════════════
-        // MKV PATH — FFmpeg remux to fragmented MP4
-        // ══════════════════════════════════════════════════════════════════════
-        // We cannot simply remap the MIME type to video/mp4 because browsers
-        // silently drop audio codecs they don't support (AC3, DTS, TrueHD…)
-        // without firing any error event. Piping through FFmpeg with
-        //   -c:v copy      → video is bit-for-bit identical (zero quality loss)
-        //   -c:a aac       → audio is transcoded to 192kbps AAC (transparent)
-        // guarantees both video AND audio play in every browser.
-        //
-        // Note: byte-range seeking is not supported on fMP4 output because the
-        // total output size is unknown before the remux completes. The browser
-        // will buffer the stream and support seeking within the buffered range.
-        // ══════════════════════════════════════════════════════════════════════
-        if (isMkv) {
+        // ── Step 2: Audio-track remux path (FFmpeg) ───────────────────────────
+        // When a specific audio track is requested we must remux through FFmpeg
+        // because the browser can't natively switch embedded tracks for MKV.
+        // We copy video bit-for-bit (-c:v copy) and transcode only the selected
+        // audio track to AAC (-c:a aac) to ensure browser compatibility.
+        if (audioTrackIdx !== null) {
             const ffmpegPath = getFfmpegPath();
-
-            // Optional seek offset: ?start=<seconds>
-            const url = new URL(req.url);
-            const startSec = parseFloat(url.searchParams.get("start") ?? "0");
             const token = await getDriveToken();
-            const fileUrl = `https://www.googleapis.com/drive/v3/files/${params.fileId}?alt=media`;
+            const fileUrl =
+                `https://www.googleapis.com/drive/v3/files/${params.fileId}` +
+                `?alt=media&supportsAllDrives=true&acknowledgeAbuse=true`;
 
-            const ffmpeg = spawn(ffmpegPath, [
-                // ── Fast seek BEFORE -i (input seek, very fast for HTTP range) ─
-                // Placed before -i so FFmpeg jumps to the nearest keyframe.
-                ...(startSec > 0 ? ["-ss", String(startSec)] : []),
-
-                // Limit probe length to prevent startup delays
-                "-probesize", "2000000",
-                "-analyzeduration", "1000000",
+            const args = [
+                "-nostdin",
+                "-probesize", "5000000",
+                "-analyzeduration", "3000000",
                 "-fflags", "+genpts+nobuffer+discardcorrupt",
-
-                // ── Drive Authentication & Input ──────────────────────────────
                 "-headers", `Authorization: Bearer ${token}\r\n`,
+            ];
+
+            if (startOffset > 0) {
+                // Use -noaccurate_seek to force audio to start at the exact same nearest 
+                // keyframe time as the copied video track to guarantee tight A/V sync.
+                args.push("-ss", String(startOffset), "-noaccurate_seek");
+            }
+
+            args.push(
                 "-i", fileUrl,
-
-                // ── Stream selection ──────────────────────────────────────────
-                "-map", "0:v:0",    // first video track
-                "-map", "0:a:0",    // first audio track
-
-                // ── Video: H.264, good quality ────────────────────────────────
-                // • pix_fmt yuv420p  → force 8-bit; browsers can't decode 10-bit H.264
-                // • preset fast      → much better quality than ultrafast, still quick
-                // • crf 18           → visually near-lossless at 720p
-                // • g 48 / keyint 24 → keyframe every ~2 s for fMP4 fragment boundaries
-                "-c:v", "libx264",
-                "-pix_fmt", "yuv420p",
-                "-preset", "fast",
-                "-crf", "18",
-                "-g", "48",
-                "-keyint_min", "24",
-                "-sc_threshold", "0",
-
-                // ── Audio: transcode to AAC ───────────────────────────────────
-                // Handles EAC3, DTS, AC3, TrueHD — all unsupported in browsers
+                "-map", "0:v:0",               // first video track (copy)
+                "-map", `0:a:${audioTrackIdx}`, // selected audio track
+                "-c:v", "copy",
                 "-c:a", "aac",
                 "-b:a", "192k",
-
-                // ── Output container: fragmented MP4 ─────────────────────────
-                // frag_keyframe     → new fragment at each H.264 keyframe (~1 s)
-                // empty_moov        → required for pipe:1 (no seekable file)
-                // default_base_moof → ISO BMFF / MSE compliance
+                "-af", "aresample=async=1",
+                "-avoid_negative_ts", "make_zero",
                 "-movflags", "frag_keyframe+empty_moov+default_base_moof",
                 "-f", "mp4",
-                "pipe:1",
-            ], {
-                stdio: ["pipe", "pipe", "pipe"],
-            });
-
-            // Log FFmpeg output in dev (shows codec details, progress, errors)
-            ffmpeg.stderr.on("data", (chunk: Buffer) =>
-                process.stdout.write(`[remux:${params.fileId}] ${chunk.toString()}`)
+                "pipe:1"
             );
+
+            const ffmpeg = spawn(ffmpegPath, args, { stdio: ["pipe", "pipe", "pipe"] });
+
+            ffmpeg.stderr.on("data", (chunk: Buffer) => {
+                console.log(`[stream-remux:${params.fileId}] ${chunk.toString()}`);
+            });
 
             const webStream = new ReadableStream({
                 start(controller) {
-                    let isClosed = false;
-                    ffmpeg.stdout.on("data", (chunk: Buffer) => {
-                        if (!isClosed) controller.enqueue(chunk);
-                    });
-                    ffmpeg.stdout.on("end", () => {
-                        if (!isClosed) { isClosed = true; controller.close(); }
-                    });
-                    ffmpeg.stdout.on("error", (err: Error) => {
-                        if (!isClosed) { isClosed = true; controller.error(err); }
-                    });
+                    let closed = false;
+                    ffmpeg.stdout.on("data", (c: Buffer) => { if (!closed) try { controller.enqueue(c); } catch { closed = true; } });
+                    ffmpeg.stdout.on("end", () => { if (!closed) { closed = true; try { controller.close(); } catch { } } });
+                    ffmpeg.stdout.on("error", (e: Error) => { if (!closed) { closed = true; try { controller.error(e); } catch { } } });
                 },
-                cancel() {
-                    ffmpeg.kill("SIGKILL");
-                },
+                cancel() { ffmpeg.kill("SIGKILL"); },
             });
 
             return new Response(webStream, {
                 status: 200,
                 headers: {
                     "Content-Type": "video/mp4",
-                    "Content-Disposition": `inline; filename="${fileName.replace(/\.mkv$/i, ".mp4")}"`,
-                    // No Content-Length  — size unknown until remux completes
-                    // No Accept-Ranges   — byte-range seeks not possible on live fMP4
+                    "Content-Disposition": `inline; filename = "${fileName}"`,
                     "Cache-Control": "no-store",
-                    "X-Remux": "ffmpeg-mkv",   // visible in DevTools for debugging
+                    "X-Audio-Track": String(audioTrackIdx),
                 },
             });
         }
 
-        // ══════════════════════════════════════════════════════════════════════
-        // NON-MKV PATH — standard byte-range streaming (MP4, WebM, etc.)
-        // Full seeking support via HTTP range requests.
-        // ══════════════════════════════════════════════════════════════════════
-        const fileSize = parseInt(meta.data.size ?? "0", 10);
-        const mimeType = rawMime;
+        // ── Step 3: Direct range-request stream (default) ─────────────────────
+        const mimeType = getBrowserMime(rawMime, fileName);
 
         let start = 0;
         let end = fileSize - 1;
         let status = 200;
+
         const responseHeaders: Record<string, string> = {
             "Content-Type": mimeType,
             "Accept-Ranges": "bytes",
-            "Content-Disposition": `inline; filename="${fileName}"`,
+            "Content-Disposition": `inline; filename = "${fileName}"`,
+            "Cache-Control": "no-store",
         };
 
         if (rangeHeader) {
@@ -170,7 +135,7 @@ export async function GET(req: Request, { params }: RouteParams) {
                 start = parseInt(match[1], 10);
                 end = match[2] ? parseInt(match[2], 10) : fileSize - 1;
                 if (end >= fileSize) end = fileSize - 1;
-                responseHeaders["Content-Range"] = `bytes ${start}-${end}/${fileSize}`;
+                responseHeaders["Content-Range"] = `bytes ${start} -${end}/${fileSize}`;
                 responseHeaders["Content-Length"] = String(end - start + 1);
                 status = 206;
             }
@@ -178,39 +143,24 @@ export async function GET(req: Request, { params }: RouteParams) {
             responseHeaders["Content-Length"] = String(fileSize);
         }
 
-        const driveStream = await drive.files.get(
-            {
-                fileId: params.fileId,
-                alt: "media",
-                supportsAllDrives: true,
-            },
-            {
-                responseType: "stream",
-                headers: rangeHeader ? { Range: `bytes=${start}-${end}` } : {},
-            }
-        );
+        const token = await getDriveToken();
+        const downloadUrl =
+            `https://www.googleapis.com/drive/v3/files/${params.fileId}` +
+            `?alt=media&supportsAllDrives=true&acknowledgeAbuse=true`;
 
-        const readable = driveStream.data as NodeJS.ReadableStream;
+        const fetchHeaders: Record<string, string> = {
+            Authorization: `Bearer ${token}`,
+        };
+        if (rangeHeader) fetchHeaders["Range"] = `bytes=${start}-${end}`;
 
-        const webStream = new ReadableStream({
-            start(controller) {
-                let isClosed = false;
-                readable.on("data", (chunk: Buffer) => {
-                    if (!isClosed) controller.enqueue(chunk);
-                });
-                readable.on("end", () => {
-                    if (!isClosed) { isClosed = true; controller.close(); }
-                });
-                readable.on("error", (err: Error) => {
-                    if (!isClosed) { isClosed = true; controller.error(err); }
-                });
-            },
-            cancel() {
-                (readable as any).destroy();
-            },
-        });
+        const driveRes = await fetch(downloadUrl, { headers: fetchHeaders });
+        if (!driveRes.ok) {
+            const errText = await driveRes.text();
+            console.error("[stream] Drive fetch failed:", driveRes.status, errText);
+            return new Response(`Drive error ${driveRes.status}: ${errText}`, { status: 502 });
+        }
 
-        return new Response(webStream, { status, headers: responseHeaders });
+        return new Response(driveRes.body, { status, headers: responseHeaders });
 
     } catch (err: unknown) {
         const message = err instanceof Error ? err.message : "Stream error";

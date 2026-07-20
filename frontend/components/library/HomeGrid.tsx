@@ -2,7 +2,8 @@
 
 import { useState, useTransition, useRef, useCallback, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { RefreshCw, LogOut, Search, X, ChevronLeft, ChevronRight, Trash2 } from "lucide-react";
+import { RefreshCw, LogOut, Search, X, ChevronLeft, ChevronRight, Trash2, Settings } from "lucide-react";
+import Link from "next/link";
 
 import { useClerk } from "@clerk/nextjs";
 import PosterCard from "@/components/ui/PosterCard";
@@ -251,16 +252,22 @@ export default function HomeGrid({ movies, series, continueWatching }: HomeGridP
         });
     }
 
-    // Force-refresh: clear all cached metadata first, then re-scan
-    // Use this when posters/names are wrong from a previous bad scan.
+    // Nuclear reset: wipe ALL DB entries (titles/seasons/episodes/progress), then rebuild from Drive.
+    // Use this when episodes are duplicated or the DB is corrupt.
     const [forceRefreshing, setForceRefreshing] = useState(false);
     async function handleForceRefresh() {
-        if (!confirm("This will clear all cached metadata and re-fetch from scratch. Continue?")) return;
+        if (!confirm(
+            "⚠️ NUCLEAR RESET\n\n" +
+            "This will DELETE all titles, seasons, episodes and watch progress " +
+            "from the database, then rebuild everything from Google Drive.\n\n" +
+            "This fixes duplicate/corrupt entries. Your video files are NOT deleted.\n\n" +
+            "Continue?"
+        )) return;
         setForceRefreshing(true);
         try {
-            // 1. Clear metadata
+            // 1. Wipe ALL DB records
             await fetch("/api/library/refresh", { method: "DELETE" });
-            // 2. Re-scan
+            // 2. Rebuild from Drive
             const res = await fetch("/api/library/refresh", { method: "POST" });
             setRefreshStatus(res.ok ? "ok" : "error");
             if (res.ok) router.refresh();
@@ -315,6 +322,15 @@ export default function HomeGrid({ movies, series, continueWatching }: HomeGridP
                 </div>
 
                 <div className="flex items-center gap-2 flex-shrink-0">
+                    <Link
+                        href="/tmdb-config"
+                        className="btn-ghost text-text-muted hover:text-white"
+                        title="TMDb Configuration / Overrides"
+                        aria-label="TMDb Configuration"
+                    >
+                        <Settings className="w-4 h-4" />
+                    </Link>
+
                     {/* Force re-scan (clears metadata first) */}
                     <button
                         id="btn-force-refresh"

@@ -62,10 +62,6 @@ export default async function PlayerPage({ params }: Props) {
                 nextEpisodeId={nextEpisode?.id ?? null}
                 savedPositionSec={episode.watchProgress?.positionSec ?? 0}
                 durationSec={episode.durationSec ?? null}
-                isNative={
-                    episode.transcodeStatus === "done" ||
-                    (episode.transcodeStatus === null && !episode.name.toLowerCase().endsWith(".mkv"))
-                }
             />
         </div>
     );

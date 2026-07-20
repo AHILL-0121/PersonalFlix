@@ -28,7 +28,6 @@ interface VideoPlayerProps {
     nextEpisodeId: string | null;
     savedPositionSec: number;
     durationSec: number | null;
-    isNative: boolean;
 }
 
 const PROGRESS_INTERVAL_MS = 10_000;
@@ -40,7 +39,6 @@ export default function VideoPlayer({
     nextEpisodeId,
     savedPositionSec,
     durationSec: _durationSec,
-    isNative,
 }: VideoPlayerProps) {
     // Reliable duration from the DB (used as fallback when browser reports
     // Infinity or a tiny fragment duration for fMP4 live streams).
@@ -68,6 +66,13 @@ export default function VideoPlayer({
     const hideControlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const progressSaveTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
+    // ── Stream / Track State ──────────────────────────────────────────────────
+    const [activeAudioTrack, setActiveAudioTrack] = useState<number | null>(null);
+
+    // If activeAudioTrack is null, we stream natively via range-requests.
+    // If it's set, we stream via FFmpeg which is a pipe and requires server-side seeking.
+    const isNative = activeAudioTrack === null;
+
     // ── Seek offset (server-side seeking for fMP4 streams) ───────────────────
     // fMP4 piped via empty_moov supports no byte-range seeking.
     // When the user seeks, we restart the stream with ?start=<seconds> and
@@ -76,11 +81,11 @@ export default function VideoPlayer({
     const currentTimeRef = useRef(initialSeek); // mirrors currentTime state, readable in effects
     const seekToTimeRef = useRef<(t: number) => void>(() => { }); // updated below
 
-    // ── Stream URL ────────────────────────────────────────────────────────────
     const baseStreamUrl = `/api/stream/${episode.driveFileId}`;
+
     const [streamUrl, setStreamUrl] = useState(() => {
         return (!isNative && initialSeek > 0)
-            ? `${baseStreamUrl}?start=${initialSeek}`
+            ? `${baseStreamUrl}?start=${initialSeek}&audioTrack=${activeAudioTrack}`
             : baseStreamUrl;
     });
 
@@ -239,21 +244,21 @@ export default function VideoPlayer({
     function onLoadedMetadata() {
         const v = videoRef.current;
         if (!v) return;
-        // Only override our DB-seeded duration if the browser reports a finite,
-        // trustworthy value (fMP4 streams initially report Infinity).
+        // Override DB duration only if browser reports a trustworthy finite value.
         if (isFinite(v.duration) && v.duration > 30) {
             setDuration(v.duration);
         }
         v.volume = volume;
 
         // Auto-seek to saved position (only needed for native MP4s, 
-        // MKVs already requested the ?start offset in the src URL)
+        // MKVs remixed through FFmpeg already requested the ?start offset in the src URL)
         if (isNative && initialSeek > 0 && v.currentTime < 1) {
             v.currentTime = initialSeek;
         }
 
         v.play().catch(() => { });
     }
+
 
     function onCanPlay() {
         setIsLoading(false);
@@ -292,11 +297,6 @@ export default function VideoPlayer({
         console.error("[player] video error", v.error.code, v.error.message);
     }
 
-    // ── Seek ──────────────────────────────────────────────────────────────────
-    // For native MP4s (isNative=true), we simply use standard HTML5 Seeking. The browser
-    // does HTTP Range requests automatically — instant and no reloading needed.
-    // For MKV on-the-fly streaming (isNative=false), it's a live fMP4 pipe. There is
-    // no fast seeking natively, so we pass ?start=X to the backend to restart the FFmpeg pipe.
     function seekToTime(time: number) {
         const v = videoRef.current;
         if (!v) return;
@@ -307,7 +307,7 @@ export default function VideoPlayer({
             v.currentTime = targetSec;
             currentTimeRef.current = targetSec;
             setCurrentTime(targetSec);
-            return; // done, client-side seek
+            return;
         }
 
         // --- Server-side seek fallback for un-transcoded MKVs ---
@@ -317,15 +317,32 @@ export default function VideoPlayer({
         setBuffered(targetSec);
         setIsLoading(true);
         const newUrl = targetSec > 0
-            ? `${baseStreamUrl}?start=${targetSec}`
-            : baseStreamUrl;
+            ? `${baseStreamUrl}?start=${targetSec}&audioTrack=${activeAudioTrack}`
+            : `${baseStreamUrl}?audioTrack=${activeAudioTrack}`;
         setStreamUrl(newUrl);
+
+        // Explicitly force video reset
+        v.pause();
+        v.src = newUrl;
+        v.load();
+        v.play().catch(() => { });
     }
-    // Keep seekToTimeRef current so keyboard effect can always call the latest version
     seekToTimeRef.current = seekToTime;
 
     // ── Seek handler (called by progress bar drag) ────────────────────────────
-    function seek(time: number) {
+    function seekPreview(time: number) {
+        const v = videoRef.current;
+        if (!v) return;
+        const targetSec = Math.max(0, Math.floor(time));
+
+        if (isNative) {
+            v.currentTime = targetSec;
+        }
+        setCurrentTime(targetSec);
+        currentTimeRef.current = targetSec;
+    }
+
+    function seekCommit(time: number) {
         seekToTime(time);
     }
 
@@ -501,10 +518,13 @@ export default function VideoPlayer({
                     audioTracks={episode.audioTracks}
                     prevEpisodeId={prevEpisodeId}
                     nextEpisodeId={nextEpisodeId}
+                    activeAudioTrack={activeAudioTrack}
+                    fileId={episode.driveFileId}
                     onTogglePlay={togglePlay}
                     onSkipBack={skipBack}
                     onSkipForward={skipForward}
-                    onSeek={seek}
+                    onSeek={seekPreview}
+                    onSeekCommit={seekCommit}
                     onVolumeChange={changeVolume}
                     onToggleMute={toggleMute}
                     onRateChange={changeRate}
@@ -514,6 +534,27 @@ export default function VideoPlayer({
                     onNext={() => nextEpisodeId && router.push(`/player/${nextEpisodeId}`)}
                     onBack={() => router.back()}
                     onHome={() => router.push("/")}
+                    onAudioTrackSwitch={(trackIdx) => {
+                        if (trackIdx === activeAudioTrack) return;
+                        setActiveAudioTrack(trackIdx);
+                        setIsLoading(true);
+                        setBuffered(0);
+                        seekOffsetRef.current = 0;
+
+                        // User specifically requested to FORCE the stream to start from 0 
+                        // to guarantee absolutely zero A/V desync distortions.
+                        const newUrl = `${baseStreamUrl}?start=0&audioTrack=${trackIdx}`;
+                        setStreamUrl(newUrl);
+
+                        const v = videoRef.current;
+                        if (v) {
+                            v.pause();
+                            v.currentTime = 0;
+                            v.src = newUrl;
+                            v.load();
+                            v.play().catch(() => { });
+                        }
+                    }}
                     videoRef={videoRef}
                 />
             </div>
