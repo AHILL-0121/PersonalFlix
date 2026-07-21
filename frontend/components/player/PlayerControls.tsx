@@ -64,6 +64,7 @@ interface PlayerControlsProps {
     onBack(): void;
     onHome(): void;
     onAudioTrackSwitch(idx: number | null): void;
+    onSetServerStream?(isServer: boolean): void;
     videoRef: RefObject<HTMLVideoElement>;
 }
 
@@ -99,6 +100,7 @@ export default function PlayerControls({
     onBack,
     onHome,
     onAudioTrackSwitch,
+    onSetServerStream,
     videoRef,
 }: PlayerControlsProps) {
     const [showSettings, setShowSettings] = useState(false);
@@ -115,6 +117,9 @@ export default function PlayerControls({
         fetch(`/api/tracks/${fileId}`)
             .then(res => res.json())
             .then(data => {
+                if (data.isMkv) {
+                    onSetServerStream?.(true);
+                }
                 if (data.audioTracks?.length > 1) {
                     setEmbeddedTracks(data.audioTracks);
                 }

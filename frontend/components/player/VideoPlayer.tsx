@@ -68,10 +68,11 @@ export default function VideoPlayer({
 
     // ── Stream / Track State ──────────────────────────────────────────────────
     const [activeAudioTrack, setActiveAudioTrack] = useState<number | null>(null);
+    const [isServerStream, setIsServerStream] = useState<boolean>(false);
 
-    // If activeAudioTrack is null, we stream natively via range-requests.
-    // If it's set, we stream via FFmpeg which is a pipe and requires server-side seeking.
-    const isNative = activeAudioTrack === null;
+    // If activeAudioTrack is null, normally we stream natively. But if track logic knows it's an MKV,
+    // isServerStream will be flipped true, forcing server-side seeking!
+    const isNative = activeAudioTrack === null && !isServerStream;
 
     // ── Seek offset (server-side seeking for fMP4 streams) ───────────────────
     // fMP4 piped via empty_moov supports no byte-range seeking.
@@ -85,7 +86,7 @@ export default function VideoPlayer({
 
     const [streamUrl, setStreamUrl] = useState(() => {
         return (!isNative && initialSeek > 0)
-            ? `${baseStreamUrl}?start=${initialSeek}&audioTrack=${activeAudioTrack}`
+            ? `${baseStreamUrl}?start=${initialSeek}&audioTrack=${activeAudioTrack ?? 0}`
             : baseStreamUrl;
     });
 
@@ -267,6 +268,9 @@ export default function VideoPlayer({
     function onPlay() {
         setIsPlaying(true);
         resetHideTimer();
+        if (typeof screen !== "undefined" && screen.orientation && screen.orientation.lock) {
+            screen.orientation.lock("landscape").catch(() => { });
+        }
     }
 
     function onPause() {
@@ -392,7 +396,11 @@ export default function VideoPlayer({
     // ── Fullscreen ────────────────────────────────────────────────────────────
     function toggleFullscreen() {
         if (!document.fullscreenElement) {
-            document.documentElement.requestFullscreen();
+            document.documentElement.requestFullscreen().then(() => {
+                if (typeof screen !== "undefined" && screen.orientation && screen.orientation.lock) {
+                    screen.orientation.lock("landscape").catch(() => { });
+                }
+            }).catch(() => { });
         } else {
             document.exitFullscreen();
         }
@@ -534,6 +542,7 @@ export default function VideoPlayer({
                     onNext={() => nextEpisodeId && router.push(`/player/${nextEpisodeId}`)}
                     onBack={() => router.back()}
                     onHome={() => router.push("/")}
+                    onSetServerStream={setIsServerStream}
                     onAudioTrackSwitch={(trackIdx) => {
                         if (trackIdx === activeAudioTrack) return;
                         setActiveAudioTrack(trackIdx);
