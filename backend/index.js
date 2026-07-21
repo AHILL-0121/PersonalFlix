@@ -51,20 +51,19 @@ app.get('/api/tracks/:fileId', async (req, res) => {
         const token = await getDriveToken();
         const fileUrl =
             `https://www.googleapis.com/drive/v3/files/${fileId}` +
-            `?alt=media&supportsAllDrives=true&acknowledgeAbuse=true`;
+            `?alt=media&supportsAllDrives=true&acknowledgeAbuse=true&access_token=${token}`;
 
         const args = [
             "-v", "quiet",
             "-print_format", "json",
             "-show_streams",
-            "-headers", `Authorization: Bearer ${token}\r\n`,
             fileUrl
         ];
 
         execFile(ffprobeStatic.path, args, { maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
             if (error) {
                 console.error("[ffprobe] Error:", error.message, stderr);
-                return res.status(500).send(error.message);
+                return res.status(500).send("FFprobe execution failed");
             }
 
             const data = JSON.parse(stdout);
@@ -84,6 +83,39 @@ app.get('/api/tracks/:fileId', async (req, res) => {
     } catch (err) {
         console.error("[tracks]", fileId, err.message);
         res.status(500).send(err.message);
+    }
+});
+
+// Get Duration
+app.get('/api/duration/:fileId', async (req, res) => {
+    const { fileId } = req.params;
+
+    try {
+        const token = await getDriveToken();
+        const fileUrl =
+            `https://www.googleapis.com/drive/v3/files/${fileId}` +
+            `?alt=media&supportsAllDrives=true&acknowledgeAbuse=true&access_token=${token}`;
+
+        const args = [
+            "-v", "quiet",
+            "-print_format", "json",
+            "-show_format",
+            fileUrl
+        ];
+
+        execFile(ffprobeStatic.path, args, { maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
+            if (error) {
+                console.error("[duration] Error:", error.message, stderr);
+                return res.json({ durationSec: 0 });
+            }
+
+            const data = JSON.parse(stdout);
+            const durationSec = data.format?.duration ? parseFloat(data.format.duration) : 0;
+            res.json({ durationSec });
+        });
+    } catch (err) {
+        console.error("[duration]", fileId, err.message);
+        res.json({ durationSec: 0 });
     }
 });
 
@@ -112,14 +144,13 @@ app.get('/api/stream/:fileId', async (req, res) => {
         const token = await getDriveToken();
         const fileUrl =
             `https://www.googleapis.com/drive/v3/files/${fileId}` +
-            `?alt=media&supportsAllDrives=true&acknowledgeAbuse=true`;
+            `?alt=media&supportsAllDrives=true&acknowledgeAbuse=true&access_token=${token}`;
 
         const args = [
             "-nostdin",
             "-probesize", "5000000",
             "-analyzeduration", "3000000",
             "-fflags", "+genpts+nobuffer+discardcorrupt",
-            "-headers", `Authorization: Bearer ${token}\r\n`,
         ];
 
         if (startOffset > 0) {

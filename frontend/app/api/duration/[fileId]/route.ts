@@ -32,6 +32,15 @@ export async function GET(_req: Request, { params }: RouteParams) {
     if (!userId) return new Response("Unauthorized", { status: 401 });
 
     try {
+        const transcoderUrl = process.env.TRANSCODER_URL;
+        if (transcoderUrl) {
+            const proxyRes = await fetch(`${transcoderUrl}/api/duration/${params.fileId}`);
+            if (proxyRes.ok) {
+                const proxyData = await proxyRes.json();
+                return Response.json(proxyData);
+            }
+        }
+
         const drive = getDriveClient();
         const ffmpegPath = getFfmpegPath();
 
