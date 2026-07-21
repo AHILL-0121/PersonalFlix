@@ -2,8 +2,9 @@ name: Keep Render Service Alive
 
 on:
   schedule:
-    # Runs every 4 minutes to prevent Render free-tier spin down
-    - cron: '*/4 * * * *'
+    # Runs every 10 minutes to prevent Render free-tier spin down (Render sleeps after 15 mins)
+    # Note: GitHub Actions does not support intervals shorter than 5 minutes.
+    - cron: '*/10 * * * *'
   workflow_dispatch: # Allows you to manually trigger it as well
 
 jobs:

@@ -302,7 +302,22 @@ export default function VideoPlayer({
         // fallback to FFmpeg transcoder to remux it to standard fMP4 on the fly.
         if (v.error.code === 4 && activeAudioTrack === null) {
             console.log("[player] Native playback rejected (Format Error). Engaging FFmpeg Transcoder fallback...");
-            setActiveAudioTrack(0);
+            const trackIdx = 0;
+            setActiveAudioTrack(trackIdx);
+            setIsLoading(true);
+            setBuffered(0);
+
+            // Try to resume from current time if it crashed mid-playback, else 0
+            const resumePos = currentTimeRef.current > 0 ? currentTimeRef.current : 0;
+            seekOffsetRef.current = resumePos;
+
+            const newUrl = `${baseStreamUrl}?start=${resumePos}&audioTrack=${trackIdx}`;
+            setStreamUrl(newUrl);
+
+            v.pause();
+            v.src = newUrl;
+            v.load();
+            v.play().catch(() => { });
         }
     }
 
