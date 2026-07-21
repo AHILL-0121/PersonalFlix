@@ -48,15 +48,20 @@ export async function GET(req: Request, { params }: RouteParams) {
         const fileName = meta.data.name ?? "video";
         const fileSize = parseInt(meta.data.size ?? "0", 10);
 
+        const isMkv = fileName.toLowerCase().endsWith(".mkv") || rawMime.includes("mkv") || rawMime.includes("matroska");
+
+        // Force remuxing for MKV files since browsers can't play them natively
+        const effectiveTrackIdx = (isMkv && audioTrackIdx === null) ? 0 : audioTrackIdx;
+
         // ── Step 2: Audio-track remux path (FFmpeg) ───────────────────────────
         // When a specific audio track is requested we must remux through FFmpeg
         // because the browser can't natively switch embedded tracks for MKV.
         // We copy video bit-for-bit (-c:v copy) and transcode only the selected
         // audio track to AAC (-c:a aac) to ensure browser compatibility.
-        if (audioTrackIdx !== null) {
+        if (effectiveTrackIdx !== null) {
             const transcoderUrl = process.env.TRANSCODER_URL;
             if (transcoderUrl) {
-                return Response.redirect(`${transcoderUrl}/api/stream/${params.fileId}?start=${startOffset}&audioTrack=${audioTrackIdx}`, 302);
+                return Response.redirect(`${transcoderUrl}/api/stream/${params.fileId}?start=${startOffset}&audioTrack=${effectiveTrackIdx}`, 302);
             }
 
             const ffmpegPath = getFfmpegPath();
@@ -82,7 +87,7 @@ export async function GET(req: Request, { params }: RouteParams) {
             args.push(
                 "-i", fileUrl,
                 "-map", "0:v:0",               // first video track (copy)
-                "-map", `0:a:${audioTrackIdx}`, // selected audio track
+                "-map", `0:a:${effectiveTrackIdx}`, // selected audio track
                 "-c:v", "copy",
                 "-c:a", "aac",
                 "-b:a", "192k",
@@ -115,7 +120,7 @@ export async function GET(req: Request, { params }: RouteParams) {
                     "Content-Type": "video/mp4",
                     "Content-Disposition": `inline; filename = "${fileName}"`,
                     "Cache-Control": "no-store",
-                    "X-Audio-Track": String(audioTrackIdx),
+                    "X-Audio-Track": String(effectiveTrackIdx),
                 },
             });
         }
