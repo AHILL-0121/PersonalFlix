@@ -199,7 +199,7 @@ app.get('/api/stream/:fileId', async (req, res) => {
     try {
         const drive = await getDriveToken();
         const token = (await drive.context._options.auth.getAccessToken()).token;
-        const fileUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true&acknowledgeAbuse=true`;
+        const fileUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true&acknowledgeAbuse=true&access_token=${token}`;
         console.log(`[stream] Generated Google Drive Media URL for ffmpeg extraction.`);
 
         const args = [
@@ -209,11 +209,6 @@ app.get('/api/stream/:fileId', async (req, res) => {
             "-analyzeduration", "3000000",
             "-fflags", "+genpts+nobuffer+discardcorrupt",
         ];
-
-        args.push(
-            "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "-headers", `Authorization: Bearer ${token}\r\n`
-        );
 
         if (startOffset > 0) {
             args.push("-ss", String(startOffset), "-noaccurate_seek");
@@ -234,6 +229,9 @@ app.get('/api/stream/:fileId', async (req, res) => {
         );
         console.log(`[stream] Spawning ffmpeg transcoder with args: ${args.join(" ")}`);
 
+        // Add strict CORS headers so Chrome doesn't abort the redirected video stream
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
         res.setHeader('Content-Type', 'video/mp4');
         res.setHeader('Cache-Control', 'no-store');
         res.setHeader('X-Audio-Track', String(audioTrackIdx));
