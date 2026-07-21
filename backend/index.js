@@ -49,14 +49,17 @@ app.get('/api/tracks/:fileId', async (req, res) => {
 
     try {
         const drive = await getDriveToken();
-        const token = (await drive.context._options.auth.getAccessToken()).token;
-        const fileUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true&acknowledgeAbuse=true&access_token=${token}`;
+
+        const driveRes = await drive.files.get(
+            { fileId, alt: 'media', supportsAllDrives: true },
+            { responseType: 'stream', headers: { Range: "bytes=0-10485760" } } // first 10MB
+        );
 
         const args = [
             "-v", "error",
             "-print_format", "json",
             "-show_streams",
-            fileUrl
+            "pipe:0"
         ];
 
         const ffprobe = spawn(ffprobeStatic.path, args);
@@ -87,6 +90,13 @@ app.get('/api/tracks/:fileId', async (req, res) => {
                 res.status(500).send("Parse error");
             }
         });
+
+        ffprobe.stdin.on('error', (err) => {
+            if (err.code !== 'EPIPE') console.error("ffprobe stdin error:", err);
+        });
+
+        driveRes.data.pipe(ffprobe.stdin);
+        driveRes.data.on('error', () => ffprobe.kill());
     } catch (err) {
         console.error("[tracks]", fileId, err.message);
         res.status(500).send(err.message);
@@ -99,14 +109,17 @@ app.get('/api/duration/:fileId', async (req, res) => {
 
     try {
         const drive = await getDriveToken();
-        const token = (await drive.context._options.auth.getAccessToken()).token;
-        const fileUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true&acknowledgeAbuse=true&access_token=${token}`;
+
+        const driveRes = await drive.files.get(
+            { fileId, alt: 'media', supportsAllDrives: true },
+            { responseType: 'stream', headers: { Range: "bytes=0-10485760" } }
+        );
 
         const args = [
             "-v", "error",
             "-print_format", "json",
             "-show_format",
-            fileUrl
+            "pipe:0"
         ];
 
         const ffprobe = spawn(ffprobeStatic.path, args);
@@ -126,6 +139,13 @@ app.get('/api/duration/:fileId', async (req, res) => {
                 res.json({ durationSec: 0 });
             }
         });
+
+        ffprobe.stdin.on('error', (err) => {
+            if (err.code !== 'EPIPE') console.error("ffprobe stdin error:", err);
+        });
+
+        driveRes.data.pipe(ffprobe.stdin);
+        driveRes.data.on('error', () => ffprobe.kill());
     } catch (err) {
         console.error("[duration]", fileId, err.message);
         res.json({ durationSec: 0 });
