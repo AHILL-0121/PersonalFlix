@@ -68,11 +68,10 @@ export default function VideoPlayer({
 
     // ── Stream / Track State ──────────────────────────────────────────────────
     const [activeAudioTrack, setActiveAudioTrack] = useState<number | null>(null);
-    const [isServerStream, setIsServerStream] = useState<boolean>(false);
 
-    // If activeAudioTrack is null, normally we stream natively. But if track logic knows it's an MKV,
-    // isServerStream will be flipped true, forcing server-side seeking!
-    const isNative = activeAudioTrack === null && !isServerStream;
+    // If activeAudioTrack is null, we stream natively via range-requests.
+    // If it's set, we stream via FFmpeg which is a pipe and requires server-side seeking.
+    const isNative = activeAudioTrack === null;
 
     // ── Seek offset (server-side seeking for fMP4 streams) ───────────────────
     // fMP4 piped via empty_moov supports no byte-range seeking.
@@ -86,7 +85,7 @@ export default function VideoPlayer({
 
     const [streamUrl, setStreamUrl] = useState(() => {
         return (!isNative && initialSeek > 0)
-            ? `${baseStreamUrl}?start=${initialSeek}&audioTrack=${activeAudioTrack ?? 0}`
+            ? `${baseStreamUrl}?start=${initialSeek}&audioTrack=${activeAudioTrack}`
             : baseStreamUrl;
     });
 
@@ -268,9 +267,6 @@ export default function VideoPlayer({
     function onPlay() {
         setIsPlaying(true);
         resetHideTimer();
-        if (typeof screen !== "undefined" && screen.orientation && "lock" in screen.orientation) {
-            (screen.orientation as any).lock("landscape").catch(() => { });
-        }
     }
 
     function onPause() {
@@ -395,28 +391,10 @@ export default function VideoPlayer({
 
     // ── Fullscreen ────────────────────────────────────────────────────────────
     function toggleFullscreen() {
-        const doc = document as any;
-        const v = videoRef.current as any;
-
-        if (!doc.fullscreenElement && !doc.webkitFullscreenElement) {
-            if (doc.documentElement.requestFullscreen) {
-                doc.documentElement.requestFullscreen().then(() => {
-                    if (typeof screen !== "undefined" && screen.orientation && "lock" in screen.orientation) {
-                        (screen.orientation as any).lock("landscape").catch(() => { });
-                    }
-                }).catch(() => { });
-            } else if (doc.documentElement.webkitRequestFullscreen) {
-                doc.documentElement.webkitRequestFullscreen();
-            } else if (v && v.webkitEnterFullscreen) {
-                // iOS mobile iPhone native fullscreen fallback
-                v.webkitEnterFullscreen();
-            }
+        if (!document.fullscreenElement) {
+            document.documentElement.requestFullscreen();
         } else {
-            if (doc.exitFullscreen) {
-                doc.exitFullscreen();
-            } else if (doc.webkitExitFullscreen) {
-                doc.webkitExitFullscreen();
-            }
+            document.exitFullscreen();
         }
     }
 
@@ -498,6 +476,7 @@ export default function VideoPlayer({
                 onEnded={onEnded}
                 onError={onVideoError}
                 playsInline
+                crossOrigin="anonymous"
             >
                 {/* Subtitle tracks */}
                 {episode.subtitleTracks.map((track) => (
@@ -555,7 +534,6 @@ export default function VideoPlayer({
                     onNext={() => nextEpisodeId && router.push(`/player/${nextEpisodeId}`)}
                     onBack={() => router.back()}
                     onHome={() => router.push("/")}
-                    onSetServerStream={setIsServerStream}
                     onAudioTrackSwitch={(trackIdx) => {
                         if (trackIdx === activeAudioTrack) return;
                         setActiveAudioTrack(trackIdx);

@@ -43,32 +43,24 @@ app.get('/', (req, res) => {
     res.send('Personal Netflix Transcoder is running!');
 });
 
-// Middleware for incoming requests
-app.use((req, res, next) => {
-    console.log(`[REQUEST] ${req.method} ${req.url}`);
-    next();
-});
-
 // Get Audio Tracks
 app.get('/api/tracks/:fileId', async (req, res) => {
     const { fileId } = req.params;
-    console.log(`[tracks] Starting extraction for ${fileId}...`);
 
     try {
         const drive = await getDriveToken();
+
         const driveRes = await drive.files.get(
             { fileId, alt: 'media', supportsAllDrives: true },
             { responseType: 'stream', headers: { Range: "bytes=0-10485760" } } // first 10MB
         );
-        console.log(`[tracks] Google Drive stream connected for ${fileId}`);
 
         const args = [
-            "-v", "error",
+            "-v", "quiet",
             "-print_format", "json",
             "-show_streams",
             "pipe:0"
         ];
-        console.log(`[tracks] Spawning ffprobe with args: ${args.join(" ")}`);
 
         const ffprobe = spawn(ffprobeStatic.path, args);
         let stdout = "";
@@ -78,11 +70,11 @@ app.get('/api/tracks/:fileId', async (req, res) => {
         ffprobe.stderr.on('data', chunk => stderr += chunk);
 
         ffprobe.on('close', (code) => {
-            console.log(`[tracks] ffprobe exited with code ${code} for ${fileId}`);
+            if (code !== 0) {
+                console.error("[tracks] ffprobe error:", stderr);
+                return res.status(500).send("FFprobe failed");
+            }
             try {
-                if (stdout.trim().length === 0) {
-                    throw new Error("ffprobe stdout was empty");
-                }
                 const data = JSON.parse(stdout);
                 const audioStreams = data.streams?.filter((s) => s.codec_type === "audio") || [];
                 const formattedTracks = audioStreams.map((s, idx) => ({
@@ -93,25 +85,20 @@ app.get('/api/tracks/:fileId', async (req, res) => {
                     codec: s.codec_name,
                     default: s.disposition?.default === 1
                 }));
-                console.log(`[tracks] Success: Found ${formattedTracks.length} tracks for ${fileId}`);
                 res.json({ audioTracks: formattedTracks });
             } catch (e) {
-                console.error(`[tracks] ffprobe failed. Code: ${code}. Err: ${e.message}. Stdout: ${stdout.substring(0, 100)}. Stderr: ${stderr}`);
-                return res.status(500).send("FFprobe failed: " + e.message);
+                res.status(500).send("Parse error");
             }
         });
 
         ffprobe.stdin.on('error', (err) => {
-            if (err.code !== 'EPIPE') console.error(`[tracks] ffprobe stdin error for ${fileId}:`, err);
+            if (err.code !== 'EPIPE') console.error("ffprobe stdin error:", err);
         });
 
         driveRes.data.pipe(ffprobe.stdin);
-        driveRes.data.on('error', (err) => {
-            console.error(`[tracks] Google Drive stream error for ${fileId}:`, err);
-            ffprobe.kill();
-        });
+        driveRes.data.on('error', () => ffprobe.kill());
     } catch (err) {
-        console.error(`[tracks] Outer error for ${fileId}:`, err.message);
+        console.error("[tracks]", fileId, err.message);
         res.status(500).send(err.message);
     }
 });
@@ -119,58 +106,45 @@ app.get('/api/tracks/:fileId', async (req, res) => {
 // Get Duration
 app.get('/api/duration/:fileId', async (req, res) => {
     const { fileId } = req.params;
-    console.log(`[duration] Starting extraction for ${fileId}...`);
 
     try {
         const drive = await getDriveToken();
+
         const driveRes = await drive.files.get(
             { fileId, alt: 'media', supportsAllDrives: true },
             { responseType: 'stream', headers: { Range: "bytes=0-10485760" } }
         );
-        console.log(`[duration] Google Drive stream connected for ${fileId}`);
 
         const args = [
-            "-v", "error",
+            "-v", "quiet",
             "-print_format", "json",
             "-show_format",
             "pipe:0"
         ];
-        console.log(`[duration] Spawning ffprobe with args: ${args.join(" ")}`);
 
         const ffprobe = spawn(ffprobeStatic.path, args);
         let stdout = "";
-        let stderr = "";
 
         ffprobe.stdout.on('data', chunk => stdout += chunk);
-        ffprobe.stderr.on('data', chunk => stderr += chunk);
 
         ffprobe.on('close', (code) => {
-            console.log(`[duration] ffprobe exited with code ${code} for ${fileId}`);
             try {
-                if (stdout.trim().length === 0) {
-                    throw new Error("ffprobe stdout was empty");
-                }
                 const data = JSON.parse(stdout);
                 const durationSec = data.format?.duration ? parseFloat(data.format.duration) : 0;
-                console.log(`[duration] Success: Duration is ${durationSec}s for ${fileId}`);
                 res.json({ durationSec });
             } catch (e) {
-                console.error(`[duration] ffprobe failed. Code: ${code}. Err: ${e.message}. Stdout: ${stdout.substring(0, 100)}. Stderr: ${stderr}`);
                 res.json({ durationSec: 0 });
             }
         });
 
         ffprobe.stdin.on('error', (err) => {
-            if (err.code !== 'EPIPE') console.error(`[duration] ffprobe stdin error for ${fileId}:`, err);
+            if (err.code !== 'EPIPE') console.error("ffprobe stdin error:", err);
         });
 
         driveRes.data.pipe(ffprobe.stdin);
-        driveRes.data.on('error', (err) => {
-            console.error(`[duration] Google Drive stream error for ${fileId}:`, err);
-            ffprobe.kill();
-        });
+        driveRes.data.on('error', () => ffprobe.kill());
     } catch (err) {
-        console.error(`[duration] Outer error for ${fileId}:`, err.message);
+        console.error("[duration]", fileId, err.message);
         res.json({ durationSec: 0 });
     }
 });
@@ -181,30 +155,28 @@ app.get('/api/stream/:fileId', async (req, res) => {
     const audioTrackIdx = req.query.audioTrack;
     const startOffset = req.query.start ? parseFloat(req.query.start) : 0;
 
-    console.log(`[stream] Processing ${fileId} | start: ${startOffset} | audioTrack: ${audioTrackIdx}`);
-
     if (!audioTrackIdx) {
         try {
-            console.log(`[stream] No audioTrack specified for ${fileId}, redirecting to native Google Drive stream.`);
             const drive = await getDriveToken();
             const token = (await drive.context._options.auth.getAccessToken()).token;
             const directUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true&acknowledgeAbuse=true&access_token=${token}`;
             return res.redirect(302, directUrl);
         } catch (err) {
-            console.error(`[stream] Native stream redirect failed for ${fileId}:`, err.message);
             return res.status(500).send("Drive token error");
         }
     }
 
     try {
         const drive = await getDriveToken();
-        const token = (await drive.context._options.auth.getAccessToken()).token;
-        const fileUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true&acknowledgeAbuse=true&access_token=${token}`;
-        console.log(`[stream] Generated Google Drive Media URL for ffmpeg extraction.`);
+
+        // Fetch stream directly through Node.js using Google's official client
+        const driveRes = await drive.files.get(
+            { fileId, alt: 'media', supportsAllDrives: true },
+            { responseType: 'stream' }
+        );
 
         const args = [
             "-nostdin",
-            "-v", "error",
             "-probesize", "5000000",
             "-analyzeduration", "3000000",
             "-fflags", "+genpts+nobuffer+discardcorrupt",
@@ -215,7 +187,7 @@ app.get('/api/stream/:fileId', async (req, res) => {
         }
 
         args.push(
-            "-i", fileUrl,
+            "-i", "pipe:0",
             "-map", "0:v:0",
             "-map", `0:a:${audioTrackIdx}`,
             "-c:v", "copy",
@@ -227,35 +199,39 @@ app.get('/api/stream/:fileId', async (req, res) => {
             "-f", "mp4",
             "pipe:1"
         );
-        console.log(`[stream] Spawning ffmpeg transcoder with args: ${args.join(" ")}`);
 
-        // Add strict CORS headers so Chrome doesn't abort the redirected video stream
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
         res.setHeader('Content-Type', 'video/mp4');
         res.setHeader('Cache-Control', 'no-store');
         res.setHeader('X-Audio-Track', String(audioTrackIdx));
 
         const ffmpeg = spawn(ffmpegStatic, args, { stdio: ["pipe", "pipe", "pipe"] });
 
+        ffmpeg.stdin.on('error', (err) => {
+            if (err.code !== 'EPIPE') console.error("ffmpeg stdin error:", err);
+        });
+
+        driveRes.data.pipe(ffmpeg.stdin);
+        driveRes.data.on('error', () => ffmpeg.kill());
+
         ffmpeg.stdout.pipe(res);
 
         ffmpeg.stderr.on('data', (chunk) => {
-            console.error(`[ffmpeg-error:${fileId}] ${chunk.toString()}`);
+            console.log(`[ffmpeg:${fileId}] ${chunk.toString()}`);
         });
 
-        ffmpeg.on('close', (code) => {
-            console.log(`[stream] ffmpeg transcoder exited with code ${code} for ${fileId}`);
+        ffmpeg.on('close', () => {
             res.end();
+            driveRes.data.destroy?.();
         });
 
+        // Kill process if client disconnects
         req.on('close', () => {
-            console.log(`[stream] Client closed connection for ${fileId}, killing ffmpeg.`);
             ffmpeg.kill('SIGKILL');
+            driveRes.data.destroy?.();
         });
 
     } catch (err) {
-        console.error(`[stream] Outer error for ${fileId}:`, err.message);
+        console.error("[stream]", fileId, err.message);
         res.status(500).send(err.message);
     }
 });
