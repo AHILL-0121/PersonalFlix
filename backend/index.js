@@ -56,7 +56,7 @@ app.get('/api/tracks/:fileId', async (req, res) => {
         );
 
         const args = [
-            "-v", "quiet",
+            "-v", "error",
             "-print_format", "json",
             "-show_streams",
             "pipe:0"
@@ -70,10 +70,6 @@ app.get('/api/tracks/:fileId', async (req, res) => {
         ffprobe.stderr.on('data', chunk => stderr += chunk);
 
         ffprobe.on('close', (code) => {
-            if (code !== 0) {
-                console.error("[tracks] ffprobe error:", stderr);
-                return res.status(500).send("FFprobe failed");
-            }
             try {
                 const data = JSON.parse(stdout);
                 const audioStreams = data.streams?.filter((s) => s.codec_type === "audio") || [];
@@ -87,6 +83,10 @@ app.get('/api/tracks/:fileId', async (req, res) => {
                 }));
                 res.json({ audioTracks: formattedTracks });
             } catch (e) {
+                if (code !== 0) {
+                    console.error("[tracks] ffprobe error:", stderr);
+                    return res.status(500).send("FFprobe failed");
+                }
                 res.status(500).send("Parse error");
             }
         });
@@ -116,7 +116,7 @@ app.get('/api/duration/:fileId', async (req, res) => {
         );
 
         const args = [
-            "-v", "quiet",
+            "-v", "error",
             "-print_format", "json",
             "-show_format",
             "pipe:0"
@@ -124,8 +124,10 @@ app.get('/api/duration/:fileId', async (req, res) => {
 
         const ffprobe = spawn(ffprobeStatic.path, args);
         let stdout = "";
+        let stderr = "";
 
         ffprobe.stdout.on('data', chunk => stdout += chunk);
+        ffprobe.stderr.on('data', chunk => stderr += chunk);
 
         ffprobe.on('close', (code) => {
             try {
@@ -133,6 +135,7 @@ app.get('/api/duration/:fileId', async (req, res) => {
                 const durationSec = data.format?.duration ? parseFloat(data.format.duration) : 0;
                 res.json({ durationSec });
             } catch (e) {
+                if (code !== 0) console.error("[duration] ffprobe error:", stderr);
                 res.json({ durationSec: 0 });
             }
         });
