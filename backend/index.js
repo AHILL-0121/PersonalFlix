@@ -71,6 +71,9 @@ app.get('/api/tracks/:fileId', async (req, res) => {
 
         ffprobe.on('close', (code) => {
             try {
+                if (stdout.trim().length === 0) {
+                    throw new Error("ffprobe stdout was empty");
+                }
                 const data = JSON.parse(stdout);
                 const audioStreams = data.streams?.filter((s) => s.codec_type === "audio") || [];
                 const formattedTracks = audioStreams.map((s, idx) => ({
@@ -83,11 +86,8 @@ app.get('/api/tracks/:fileId', async (req, res) => {
                 }));
                 res.json({ audioTracks: formattedTracks });
             } catch (e) {
-                if (code !== 0) {
-                    console.error("[tracks] ffprobe error:", stderr);
-                    return res.status(500).send("FFprobe failed");
-                }
-                res.status(500).send("Parse error");
+                console.error(`[tracks] ffprobe failed. Code: ${code}. Err: ${e.message}. Stdout: ${stdout.substring(0, 50)}. Stderr: ${stderr}`);
+                return res.status(500).send("FFprobe failed: " + e.message);
             }
         });
 
@@ -131,11 +131,14 @@ app.get('/api/duration/:fileId', async (req, res) => {
 
         ffprobe.on('close', (code) => {
             try {
+                if (stdout.trim().length === 0) {
+                    throw new Error("ffprobe stdout was empty");
+                }
                 const data = JSON.parse(stdout);
                 const durationSec = data.format?.duration ? parseFloat(data.format.duration) : 0;
                 res.json({ durationSec });
             } catch (e) {
-                if (code !== 0) console.error("[duration] ffprobe error:", stderr);
+                console.error(`[duration] ffprobe failed. Code: ${code}. Err: ${e.message}. Stdout: ${stdout.substring(0, 50)}. Stderr: ${stderr}`);
                 res.json({ durationSec: 0 });
             }
         });
