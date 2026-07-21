@@ -268,8 +268,8 @@ export default function VideoPlayer({
     function onPlay() {
         setIsPlaying(true);
         resetHideTimer();
-        if (typeof screen !== "undefined" && screen.orientation && screen.orientation.lock) {
-            screen.orientation.lock("landscape").catch(() => { });
+        if (typeof screen !== "undefined" && screen.orientation && "lock" in screen.orientation) {
+            (screen.orientation as any).lock("landscape").catch(() => { });
         }
     }
 
@@ -395,14 +395,28 @@ export default function VideoPlayer({
 
     // ── Fullscreen ────────────────────────────────────────────────────────────
     function toggleFullscreen() {
-        if (!document.fullscreenElement) {
-            document.documentElement.requestFullscreen().then(() => {
-                if (typeof screen !== "undefined" && screen.orientation && screen.orientation.lock) {
-                    screen.orientation.lock("landscape").catch(() => { });
-                }
-            }).catch(() => { });
+        const doc = document as any;
+        const v = videoRef.current as any;
+
+        if (!doc.fullscreenElement && !doc.webkitFullscreenElement) {
+            if (doc.documentElement.requestFullscreen) {
+                doc.documentElement.requestFullscreen().then(() => {
+                    if (typeof screen !== "undefined" && screen.orientation && "lock" in screen.orientation) {
+                        (screen.orientation as any).lock("landscape").catch(() => { });
+                    }
+                }).catch(() => { });
+            } else if (doc.documentElement.webkitRequestFullscreen) {
+                doc.documentElement.webkitRequestFullscreen();
+            } else if (v && v.webkitEnterFullscreen) {
+                // iOS mobile iPhone native fullscreen fallback
+                v.webkitEnterFullscreen();
+            }
         } else {
-            document.exitFullscreen();
+            if (doc.exitFullscreen) {
+                doc.exitFullscreen();
+            } else if (doc.webkitExitFullscreen) {
+                doc.webkitExitFullscreen();
+            }
         }
     }
 
