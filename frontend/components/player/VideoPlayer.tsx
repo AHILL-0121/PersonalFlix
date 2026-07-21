@@ -294,7 +294,16 @@ export default function VideoPlayer({
         const v = videoRef.current;
         if (!v || !v.error) return;
         if (v.error.code === MediaError.MEDIA_ERR_ABORTED) return;
+
         console.error("[player] video error", v.error.code, v.error.message);
+
+        // MediaError 4: MEDIA_ERR_SRC_NOT_SUPPORTED
+        // If native playback fails (CORS, unplayable codec like HEVC, unsupported container), 
+        // fallback to FFmpeg transcoder to remux it to standard fMP4 on the fly.
+        if (v.error.code === 4 && activeAudioTrack === null) {
+            console.log("[player] Native playback rejected (Format Error). Engaging FFmpeg Transcoder fallback...");
+            setActiveAudioTrack(0);
+        }
     }
 
     function seekToTime(time: number) {
