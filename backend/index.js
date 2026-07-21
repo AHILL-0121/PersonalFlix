@@ -91,6 +91,10 @@ app.get('/api/tracks/:fileId', async (req, res) => {
             }
         });
 
+        ffprobe.stdin.on('error', (err) => {
+            if (err.code !== 'EPIPE') console.error("ffprobe stdin error:", err);
+        });
+
         driveRes.data.pipe(ffprobe.stdin);
         driveRes.data.on('error', () => ffprobe.kill());
     } catch (err) {
@@ -131,6 +135,10 @@ app.get('/api/duration/:fileId', async (req, res) => {
             } catch (e) {
                 res.json({ durationSec: 0 });
             }
+        });
+
+        ffprobe.stdin.on('error', (err) => {
+            if (err.code !== 'EPIPE') console.error("ffprobe stdin error:", err);
         });
 
         driveRes.data.pipe(ffprobe.stdin);
