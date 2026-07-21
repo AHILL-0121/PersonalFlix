@@ -54,6 +54,11 @@ export async function GET(req: Request, { params }: RouteParams) {
         // We copy video bit-for-bit (-c:v copy) and transcode only the selected
         // audio track to AAC (-c:a aac) to ensure browser compatibility.
         if (audioTrackIdx !== null) {
+            const transcoderUrl = process.env.TRANSCODER_URL;
+            if (transcoderUrl) {
+                return Response.redirect(`${transcoderUrl}/api/stream/${params.fileId}?start=${startOffset}&audioTrack=${audioTrackIdx}`, 302);
+            }
+
             const ffmpegPath = getFfmpegPath();
             const token = await getDriveToken();
             const fileUrl =
@@ -115,52 +120,12 @@ export async function GET(req: Request, { params }: RouteParams) {
             });
         }
 
-        // ── Step 3: Direct range-request stream (default) ─────────────────────
-        const mimeType = getBrowserMime(rawMime, fileName);
-
-        let start = 0;
-        let end = fileSize - 1;
-        let status = 200;
-
-        const responseHeaders: Record<string, string> = {
-            "Content-Type": mimeType,
-            "Accept-Ranges": "bytes",
-            "Content-Disposition": `inline; filename = "${fileName}"`,
-            "Cache-Control": "no-store",
-        };
-
-        if (rangeHeader) {
-            const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
-            if (match) {
-                start = parseInt(match[1], 10);
-                end = match[2] ? parseInt(match[2], 10) : fileSize - 1;
-                if (end >= fileSize) end = fileSize - 1;
-                responseHeaders["Content-Range"] = `bytes ${start} -${end}/${fileSize}`;
-                responseHeaders["Content-Length"] = String(end - start + 1);
-                status = 206;
-            }
-        } else {
-            responseHeaders["Content-Length"] = String(fileSize);
-        }
-
         const token = await getDriveToken();
-        const downloadUrl =
+        const directUrl =
             `https://www.googleapis.com/drive/v3/files/${params.fileId}` +
-            `?alt=media&supportsAllDrives=true&acknowledgeAbuse=true`;
+            `?alt=media&supportsAllDrives=true&acknowledgeAbuse=true&access_token=${token}`;
 
-        const fetchHeaders: Record<string, string> = {
-            Authorization: `Bearer ${token}`,
-        };
-        if (rangeHeader) fetchHeaders["Range"] = `bytes=${start}-${end}`;
-
-        const driveRes = await fetch(downloadUrl, { headers: fetchHeaders });
-        if (!driveRes.ok) {
-            const errText = await driveRes.text();
-            console.error("[stream] Drive fetch failed:", driveRes.status, errText);
-            return new Response(`Drive error ${driveRes.status}: ${errText}`, { status: 502 });
-        }
-
-        return new Response(driveRes.body, { status, headers: responseHeaders });
+        return Response.redirect(directUrl, 302);
 
     } catch (err: unknown) {
         const message = err instanceof Error ? err.message : "Stream error";

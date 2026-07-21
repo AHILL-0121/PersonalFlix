@@ -8,8 +8,10 @@ It automatically scans your Google Drive folders, fetches rich metadata (posters
 
 - **Google Drive Integration**: Uses the Google Drive API to stream video files directly. No need to download heavy video files or maintain a dedicated media server PC.
 - **Intelligent Metadata Matching**: Automatically queries both **TMDB** and **OMDb** to populate high-resolution posters, backdrops, ratings, and episode synopses based on your folder and file names.
+- **TMDb Manual Override Dashboard**: A built-in configuration UI (`/tmdb-config`) letting you cleanly fix mismatching entries and specifically opt-in to fetch deeply accurate TV Series metadata directly from TMDb!
 - **Progress Tracking & "Continue Watching"**: Automatically tracks watch progress per user, remembering exactly where you left off in an episode or movie.
-- **Custom Video Player**: A custom-built, responsive HTML5 video player featuring +/- 10s skips, volume memory, seamless Media Session API integration (hardware media keys), full-screen mode, and cross-browser support.
+- **Live MKV Audio Track Remuxing**: Fully powered by a custom Next.js server-side FFmpeg integration natively routing MKV streams via local pipes. Includes robust handling for embedded multi-language audio track switching with perfect AV-sync `-noaccurate_seek` mapping over HTTP requests!
+- **Custom Video Player**: A premium, custom-built responsive HTML5 video player featuring +/- 10s skip, audio language switcher, volume memory, seamless Media Session API integration (hardware media keys), full-screen mode, and cross-browser pipe streaming.
 - **Modern Tech Stack**: Built with Next.js 14 App Router, styled with Tailwind CSS, and powered by server-side React components for blazing-fast performance.
 - **Secure Authentication**: Integrated with Clerk for seamless, secure user management.
 

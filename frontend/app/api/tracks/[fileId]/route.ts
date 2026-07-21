@@ -9,6 +9,18 @@ export async function GET(req: Request, { params }: { params: { fileId: string }
     if (!userId) return new Response("Unauthorized", { status: 401 });
 
     try {
+        const transcoderUrl = process.env.TRANSCODER_URL;
+        if (transcoderUrl) {
+            const proxyRes = await fetch(`${transcoderUrl}/api/tracks/${params.fileId}`);
+            if (proxyRes.ok) {
+                const proxyData = await proxyRes.json();
+                return new Response(JSON.stringify(proxyData), {
+                    status: 200,
+                    headers: { "Content-Type": "application/json" }
+                });
+            }
+        }
+
         const token = await getDriveToken();
         const fileUrl =
             `https://www.googleapis.com/drive/v3/files/${params.fileId}` +
