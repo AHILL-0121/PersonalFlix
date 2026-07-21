@@ -32,10 +32,10 @@ async function getDriveToken() {
         ['https://www.googleapis.com/auth/drive.readonly']
     );
 
-    const tokenRes = await auth.authorize();
-    _driveToken = tokenRes.access_token;
-    _tokenExpiry = tokenRes.expiry_date - 60000;
-    return _driveToken;
+    const drive = google.drive({ version: 'v3', auth });
+    _driveClient = drive;
+    _tokenExpiry = Date.now() + 3500000; // Refresh roughly every hour
+    return _driveClient;
 }
 
 // Health check for Render
@@ -48,38 +48,51 @@ app.get('/api/tracks/:fileId', async (req, res) => {
     const { fileId } = req.params;
 
     try {
-        const token = await getDriveToken();
-        const fileUrl =
-            `https://www.googleapis.com/drive/v3/files/${fileId}` +
-            `?alt=media&supportsAllDrives=true&acknowledgeAbuse=true&access_token=${token}`;
+        const drive = await getDriveToken();
+
+        const driveRes = await drive.files.get(
+            { fileId, alt: 'media', supportsAllDrives: true },
+            { responseType: 'stream', headers: { Range: "bytes=0-10485760" } } // first 10MB
+        );
 
         const args = [
             "-v", "quiet",
             "-print_format", "json",
             "-show_streams",
-            fileUrl
+            "pipe:0"
         ];
 
-        execFile(ffprobeStatic.path, args, { maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
-            if (error) {
-                console.error("[ffprobe] Error:", error.message, stderr);
-                return res.status(500).send("FFprobe execution failed");
+        const ffprobe = spawn(ffprobeStatic.path, args);
+        let stdout = "";
+        let stderr = "";
+
+        ffprobe.stdout.on('data', chunk => stdout += chunk);
+        ffprobe.stderr.on('data', chunk => stderr += chunk);
+
+        ffprobe.on('close', (code) => {
+            if (code !== 0) {
+                console.error("[tracks] ffprobe error:", stderr);
+                return res.status(500).send("FFprobe failed");
             }
-
-            const data = JSON.parse(stdout);
-            const audioStreams = data.streams?.filter((s) => s.codec_type === "audio") || [];
-
-            const formattedTracks = audioStreams.map((s, idx) => ({
-                index: idx,
-                absoluteIndex: s.index,
-                label: s.tags?.title || s.tags?.language || `Audio Track ${idx + 1}`,
-                language: s.tags?.language || "und",
-                codec: s.codec_name,
-                default: s.disposition?.default === 1
-            }));
-
-            res.json({ audioTracks: formattedTracks });
+            try {
+                const data = JSON.parse(stdout);
+                const audioStreams = data.streams?.filter((s) => s.codec_type === "audio") || [];
+                const formattedTracks = audioStreams.map((s, idx) => ({
+                    index: idx,
+                    absoluteIndex: s.index,
+                    label: s.tags?.title || s.tags?.language || `Audio Track ${idx + 1}`,
+                    language: s.tags?.language || "und",
+                    codec: s.codec_name,
+                    default: s.disposition?.default === 1
+                }));
+                res.json({ audioTracks: formattedTracks });
+            } catch (e) {
+                res.status(500).send("Parse error");
+            }
         });
+
+        driveRes.data.pipe(ffprobe.stdin);
+        driveRes.data.on('error', () => ffprobe.kill());
     } catch (err) {
         console.error("[tracks]", fileId, err.message);
         res.status(500).send(err.message);
@@ -91,28 +104,37 @@ app.get('/api/duration/:fileId', async (req, res) => {
     const { fileId } = req.params;
 
     try {
-        const token = await getDriveToken();
-        const fileUrl =
-            `https://www.googleapis.com/drive/v3/files/${fileId}` +
-            `?alt=media&supportsAllDrives=true&acknowledgeAbuse=true&access_token=${token}`;
+        const drive = await getDriveToken();
+
+        const driveRes = await drive.files.get(
+            { fileId, alt: 'media', supportsAllDrives: true },
+            { responseType: 'stream', headers: { Range: "bytes=0-10485760" } }
+        );
 
         const args = [
             "-v", "quiet",
             "-print_format", "json",
             "-show_format",
-            fileUrl
+            "pipe:0"
         ];
 
-        execFile(ffprobeStatic.path, args, { maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
-            if (error) {
-                console.error("[duration] Error:", error.message, stderr);
-                return res.json({ durationSec: 0 });
-            }
+        const ffprobe = spawn(ffprobeStatic.path, args);
+        let stdout = "";
 
-            const data = JSON.parse(stdout);
-            const durationSec = data.format?.duration ? parseFloat(data.format.duration) : 0;
-            res.json({ durationSec });
+        ffprobe.stdout.on('data', chunk => stdout += chunk);
+
+        ffprobe.on('close', (code) => {
+            try {
+                const data = JSON.parse(stdout);
+                const durationSec = data.format?.duration ? parseFloat(data.format.duration) : 0;
+                res.json({ durationSec });
+            } catch (e) {
+                res.json({ durationSec: 0 });
+            }
         });
+
+        driveRes.data.pipe(ffprobe.stdin);
+        driveRes.data.on('error', () => ffprobe.kill());
     } catch (err) {
         console.error("[duration]", fileId, err.message);
         res.json({ durationSec: 0 });
@@ -125,15 +147,11 @@ app.get('/api/stream/:fileId', async (req, res) => {
     const audioTrackIdx = req.query.audioTrack;
     const startOffset = req.query.start ? parseFloat(req.query.start) : 0;
 
-    // Normal streaming directly from drive without ffmpeg shouldn't hit this server
-    // but just in case, if no audio track is provided, we redirect them to Drive 
-    // to save Render's bandwidth too.
     if (!audioTrackIdx) {
         try {
-            const token = await getDriveToken();
-            const directUrl =
-                `https://www.googleapis.com/drive/v3/files/${fileId}` +
-                `?alt=media&supportsAllDrives=true&acknowledgeAbuse=true&access_token=${token}`;
+            const drive = await getDriveToken();
+            const token = (await drive.context._options.auth.getAccessToken()).token;
+            const directUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true&acknowledgeAbuse=true&access_token=${token}`;
             return res.redirect(302, directUrl);
         } catch (err) {
             return res.status(500).send("Drive token error");
@@ -141,10 +159,9 @@ app.get('/api/stream/:fileId', async (req, res) => {
     }
 
     try {
-        const token = await getDriveToken();
-        const fileUrl =
-            `https://www.googleapis.com/drive/v3/files/${fileId}` +
-            `?alt=media&supportsAllDrives=true&acknowledgeAbuse=true&access_token=${token}`;
+        const drive = await getDriveToken();
+        const token = (await drive.context._options.auth.getAccessToken()).token;
+        const fileUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true&acknowledgeAbuse=true&access_token=${token}`;
 
         const args = [
             "-nostdin",
