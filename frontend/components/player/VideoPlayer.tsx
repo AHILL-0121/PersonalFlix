@@ -476,7 +476,6 @@ export default function VideoPlayer({
                 onEnded={onEnded}
                 onError={onVideoError}
                 playsInline
-                crossOrigin="anonymous"
             >
                 {/* Subtitle tracks */}
                 {episode.subtitleTracks.map((track) => (
