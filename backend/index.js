@@ -168,12 +168,8 @@ app.get('/api/stream/:fileId', async (req, res) => {
 
     try {
         const drive = await getDriveToken();
-
-        // Fetch stream directly through Node.js using Google's official client
-        const driveRes = await drive.files.get(
-            { fileId, alt: 'media', supportsAllDrives: true },
-            { responseType: 'stream' }
-        );
+        const token = (await drive.context._options.auth.getAccessToken()).token;
+        const fileUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true&acknowledgeAbuse=true&access_token=${token}`;
 
         const args = [
             "-nostdin",
@@ -187,7 +183,7 @@ app.get('/api/stream/:fileId', async (req, res) => {
         }
 
         args.push(
-            "-i", "pipe:0",
+            "-i", fileUrl,
             "-map", "0:v:0",
             "-map", `0:a:${audioTrackIdx}`,
             "-c:v", "copy",
@@ -206,13 +202,6 @@ app.get('/api/stream/:fileId', async (req, res) => {
 
         const ffmpeg = spawn(ffmpegStatic, args, { stdio: ["pipe", "pipe", "pipe"] });
 
-        ffmpeg.stdin.on('error', (err) => {
-            if (err.code !== 'EPIPE') console.error("ffmpeg stdin error:", err);
-        });
-
-        driveRes.data.pipe(ffmpeg.stdin);
-        driveRes.data.on('error', () => ffmpeg.kill());
-
         ffmpeg.stdout.pipe(res);
 
         ffmpeg.stderr.on('data', (chunk) => {
@@ -221,13 +210,11 @@ app.get('/api/stream/:fileId', async (req, res) => {
 
         ffmpeg.on('close', () => {
             res.end();
-            driveRes.data.destroy?.();
         });
 
         // Kill process if client disconnects
         req.on('close', () => {
             ffmpeg.kill('SIGKILL');
-            driveRes.data.destroy?.();
         });
 
     } catch (err) {
