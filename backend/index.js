@@ -175,14 +175,21 @@ app.get('/api/stream/:fileId', async (req, res) => {
     try {
         const drive = await getDriveToken();
         const token = (await drive.context._options.auth.getAccessToken()).token;
-        const fileUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true&acknowledgeAbuse=true&access_token=${token}`;
+        const fileUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true&acknowledgeAbuse=true`;
 
         const args = [
             "-nostdin",
+            "-v", "error", // Print actual errors if file fetching fails
             "-probesize", "5000000",
             "-analyzeduration", "3000000",
             "-fflags", "+genpts+nobuffer+discardcorrupt",
         ];
+
+        // Ensure fake user agent and send true Bearer auth to avoid 403 blocks
+        args.push(
+            "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "-headers", `Authorization: Bearer ${token}\r\n`
+        );
 
         if (startOffset > 0) {
             args.push("-ss", String(startOffset), "-noaccurate_seek");
