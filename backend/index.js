@@ -115,16 +115,13 @@ app.get('/api/duration/:fileId', async (req, res) => {
 
 // ── Stream Remuxing ───────────────────────────────────────────────────────────
 // For native (no audioTrack param) → redirect to signed Drive URL.
-// For FFmpeg mode                  → use INPUT-LEVEL SEEKING: pass -ss BEFORE -i
-//   and also use a byte-range on the Drive fetch to skip far into the file,
-//   dramatically reducing startup time when seeking mid-episode.
+// For FFmpeg mode → use INPUT-LEVEL SEEKING: pass -ss BEFORE -i.
 //
-// Byte-range approximation: assume ~500 kbits/s average bitrate.
-// We fetch from (startSec * 62500) bytes to EOF so Drive doesn't stream
-// the whole file from the beginning.  FFmpeg still does a short forward-scan
-// before its keyframe but it's now measured in seconds, not minutes.
-const APPROX_BYTES_PER_SEC = 62_500; // 500 kbits/s → 62500 Bytes/s (conservative)
-const BYTE_SEEK_PADDING = 30;    // extra seconds of padding before the seek point
+// IMPORTANT: MKV/WebM containers store their EBML header only at byte 0.
+// Sending a byte-range starting mid-file gives FFmpeg invalid data and crashes.
+// We must ALWAYS fetch from byte 0 and use -ss (before -i) to seek.
+// Input-level -ss discards packets at the demuxer layer without decoding them,
+// so seeking 17 minutes in takes ~2-4 seconds instead of many minutes.
 
 app.get('/api/stream/:fileId', async (req, res) => {
     const { fileId } = req.params;
@@ -147,17 +144,11 @@ app.get('/api/stream/:fileId', async (req, res) => {
     try {
         const drive = await getDriveClient();
 
-        // Calculate a byte offset so we don't download the whole file from
-        // the start when the user seeks to, say, 17 minutes in.
-        const paddedStart = Math.max(0, startOffset - BYTE_SEEK_PADDING);
-        const byteRangeStart = Math.floor(paddedStart * APPROX_BYTES_PER_SEC);
-        const rangeHeader = byteRangeStart > 0
-            ? { Range: `bytes=${byteRangeStart}-` }
-            : {};                                          // from the beginning
-
+        // Always fetch from byte 0 — MKV requires the full header at the start.
+        // FFmpeg's input-level -ss handle the seek efficiently.
         const driveRes = await drive.files.get(
             { fileId, alt: 'media', supportsAllDrives: true },
-            { responseType: 'stream', headers: rangeHeader }
+            { responseType: 'stream' }
         );
 
         // ── Build FFmpeg args ─────────────────────────────────────────────────
@@ -170,13 +161,10 @@ app.get('/api/stream/:fileId', async (req, res) => {
             "-fflags", "+genpts+nobuffer+discardcorrupt",
         ];
 
-        // Input-level seek: ffmpeg will decode forward from the nearest keyframe
-        // just before startOffset, so actual output starts exactly at startOffset.
+        // Input-level seek: FFmpeg skips packets at the demuxer layer (no decoding)
+        // until it reaches the keyframe just before startOffset. Fast and accurate.
         if (startOffset > 0) {
-            // paddedStart positions the byte-range start; now tell ffmpeg the
-            // remaining seconds to skip within that partial download.
-            const localSeek = startOffset - paddedStart; // seek within the downloaded slice
-            args.push("-ss", String(localSeek));
+            args.push("-ss", String(startOffset));
         }
 
         args.push(
