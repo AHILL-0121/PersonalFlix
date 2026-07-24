@@ -128,6 +128,43 @@ app.get('/api/stream/:fileId', async (req, res) => {
     const audioTrackIdx = req.query.audioTrack;
     const startOffset = req.query.start ? parseFloat(req.query.start) : 0;
 
+    // ── Pure Proxy mode (for MP4s blocked by mobile cross-site tracking) ──────
+    if (req.query.proxy === '1') {
+        try {
+            const drive = await getDriveClient();
+            const range = req.headers.range || '';
+            const driveOptions = { responseType: 'stream' };
+            if (range) {
+                driveOptions.headers = { Range: range };
+            }
+
+            const driveRes = await drive.files.get(
+                { fileId, alt: 'media', supportsAllDrives: true },
+                driveOptions
+            );
+
+            // Pass headers from Google Drive to the client to support proper HTML5 video streaming
+            const headers = driveRes.headers;
+            for (const key in headers) {
+                // Ensure proper content type is set
+                res.setHeader(key, headers[key]);
+            }
+            // For Safari/Webkit: explicitly ensure content-type is video/mp4 rather than generic
+            if (headers['content-type']?.includes('octet-stream')) {
+                res.setHeader('content-type', 'video/mp4');
+            }
+
+            // Must use the same status code Google returned (usually 206 for range requests)
+            res.status(driveRes.status);
+
+            driveRes.data.pipe(res);
+            req.on('close', () => driveRes.data.destroy && driveRes.data.destroy());
+            return;
+        } catch (err) {
+            return res.status(500).send("Proxy error: " + err.message);
+        }
+    }
+
     // ── Native mode: redirect to signed Google Drive URL ─────────────────────
     if (!audioTrackIdx) {
         try {

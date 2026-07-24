@@ -53,7 +53,17 @@ export async function GET(req: Request, { params }: RouteParams) {
         // Force remuxing for MKV files since browsers can't play them natively
         const effectiveTrackIdx = (isMkv && audioTrackIdx === null) ? 0 : audioTrackIdx;
 
-        // ── Step 2: Audio-track remux path (FFmpeg) ───────────────────────────
+        const proxyParam = url.searchParams.get("proxy");
+
+        // ── Step 2: Pure Proxy path (For MP4s blocked on mobile) ───────────────
+        if (proxyParam === "1") {
+            const transcoderUrl = process.env.TRANSCODER_URL;
+            if (transcoderUrl) {
+                return Response.redirect(`${transcoderUrl}/api/stream/${params.fileId}?proxy=1`, 302);
+            }
+        }
+
+        // ── Step 3: Audio-track remux path (FFmpeg) ───────────────────────────
         // When a specific audio track is requested we must remux through FFmpeg
         // because the browser can't natively switch embedded tracks for MKV.
         // We copy video bit-for-bit (-c:v copy) and transcode only the selected

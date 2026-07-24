@@ -370,18 +370,25 @@ export default function VideoPlayer({
         console.error("[player] video error", v.error.code, v.error.message);
 
         // MediaError 4: MEDIA_ERR_SRC_NOT_SUPPORTED
-        // On mobile Edge/Safari, direct Google Drive redirects often fail with Code 4
-        // due to cross-site tracking limits blocking the 302 token redirect.
-        // We bypass this entirely by instantly falling back to the Render transcoder
-        // which fetches the file server-side and safely pipes it as a clean fMP4 stream.
         if (v.error.code === 4 && activeAudioTrack === null) {
-            console.log("[player] Native playback rejected (Format Error). Engaging Server Transcoder proxy...");
-            setActiveAudioTrack(0); // 0 triggers the server-side FFmpeg path
-            const fallbackUrl = `${baseStreamUrl}?start=${Math.floor(currentTimeRef.current)}&audioTrack=0`;
-            setStreamUrl(fallbackUrl);
-            v.src = fallbackUrl;
-            v.load();
-            v.play().catch(() => { });
+            const isMkv = episode.name?.toLowerCase().includes(".mkv") || (episode as any).mkvFileId;
+            if (isMkv) {
+                console.log("[player] MKV Format Error → engaging FFmpeg transcoder fallback");
+                setActiveAudioTrack(0);
+                const fallbackUrl = `${baseStreamUrl}?start=${Math.floor(currentTimeRef.current)}&audioTrack=0`;
+                setStreamUrl(fallbackUrl);
+                v.src = fallbackUrl;
+                v.load();
+                v.play().catch(() => { });
+            } else {
+                console.log("[player] MP4 Format Error → routing through Server Proxy (bypassing Drive redirect)");
+                const proxyUrl = `${baseStreamUrl}?proxy=1`;
+                // Keep isNative = true because pure proxy supports standard HTML5 byte-range seeking!
+                setStreamUrl(proxyUrl);
+                v.src = proxyUrl;
+                v.load();
+                v.play().catch(() => { });
+            }
         }
     }
 
