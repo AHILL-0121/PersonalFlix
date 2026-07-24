@@ -361,9 +361,7 @@ export default function VideoPlayer({
     // MEDIA_ERR_ABORTED (1) — browser cancelled fetch on seek/unmount, ignore.
     // MEDIA_ERR_NETWORK  (2) — transient network error; let the browser retry.
     // MEDIA_ERR_DECODE   (3) — codec issue, log it.
-    // MEDIA_ERR_SRC_NOT_SUPPORTED (4) — for MKV: engage FFmpeg fallback.
-    //                                    for MP4: reload (Drive URL may have expired).
-    const nativeRetryCount = useRef(0);
+    // MEDIA_ERR_SRC_NOT_SUPPORTED (4) — unsupported format OR mobile cross-site proxy block.
     function onVideoError() {
         const v = videoRef.current;
         if (!v || !v.error) return;
@@ -371,19 +369,14 @@ export default function VideoPlayer({
 
         console.error("[player] video error", v.error.code, v.error.message);
 
+        // MediaError 4: MEDIA_ERR_SRC_NOT_SUPPORTED
+        // On mobile Edge/Safari, direct Google Drive redirects often fail with Code 4
+        // due to cross-site tracking limits blocking the 302 token redirect.
+        // We bypass this entirely by instantly falling back to the Render transcoder
+        // which fetches the file server-side and safely pipes it as a clean fMP4 stream.
         if (v.error.code === 4 && activeAudioTrack === null) {
-            const isMkv = episode.name?.toLowerCase().includes(".mkv") || (episode).mkvFileId;
-            if (isMkv) {
-                // MKV can't play natively in most browsers — remux via FFmpeg
-                console.log("[player] MKV Format Error → engaging FFmpeg transcoder fallback");
-                setActiveAudioTrack(0);
-            } else if (nativeRetryCount.current < 2) {
-                // MP4 Format Error — usually a stale Drive redirect URL. Reload.
-                nativeRetryCount.current++;
-                console.log("[player] MP4 Format Error → reloading stream (attempt", nativeRetryCount.current, ")");
-                v.load();
-                v.play().catch(() => { });
-            }
+            console.log("[player] Native playback rejected (Format Error). Engaging Server Transcoder proxy...");
+            setActiveAudioTrack(0); // 0 triggers the server-side FFmpeg path
         }
     }
 
