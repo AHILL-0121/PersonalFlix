@@ -169,7 +169,7 @@ app.get('/api/stream/:fileId', async (req, res) => {
     try {
         const drive = await getDriveToken();
         const token = (await drive.context._options.auth.getAccessToken()).token;
-        const fileUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true&acknowledgeAbuse=true&access_token=${token}`;
+        const fileUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true&acknowledgeAbuse=true`;
 
         const args = [
             "-nostdin",
@@ -183,11 +183,13 @@ app.get('/api/stream/:fileId', async (req, res) => {
         }
 
         args.push(
+            "-headers", `Authorization: Bearer ${token}\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n`,
             "-i", fileUrl,
             "-map", "0:v:0",
             "-map", `0:a:${audioTrackIdx}`,
             "-c:v", "copy",
             "-c:a", "aac",
+            "-ac", "2",
             "-b:a", "192k",
             "-af", "aresample=async=1",
             "-avoid_negative_ts", "make_zero",
