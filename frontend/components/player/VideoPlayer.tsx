@@ -359,8 +359,11 @@ export default function VideoPlayer({
     }
 
     // MEDIA_ERR_ABORTED (1) — browser cancelled fetch on seek/unmount, ignore.
-    // MEDIA_ERR_DECODE   (3) — unexpected here since MKV is now handled server-
-    //                          side, but log it in case of other codec issues.
+    // MEDIA_ERR_NETWORK  (2) — transient network error; let the browser retry.
+    // MEDIA_ERR_DECODE   (3) — codec issue, log it.
+    // MEDIA_ERR_SRC_NOT_SUPPORTED (4) — for MKV: engage FFmpeg fallback.
+    //                                    for MP4: reload (Drive URL may have expired).
+    const nativeRetryCount = useRef(0);
     function onVideoError() {
         const v = videoRef.current;
         if (!v || !v.error) return;
@@ -368,12 +371,19 @@ export default function VideoPlayer({
 
         console.error("[player] video error", v.error.code, v.error.message);
 
-        // MediaError 4: MEDIA_ERR_SRC_NOT_SUPPORTED
-        // If native playback fails (CORS, unplayable codec like HEVC, unsupported container), 
-        // fallback to FFmpeg transcoder to remux it to standard fMP4 on the fly.
         if (v.error.code === 4 && activeAudioTrack === null) {
-            console.log("[player] Native playback rejected (Format Error). Engaging FFmpeg Transcoder fallback...");
-            setActiveAudioTrack(0);
+            const isMkv = episode.name?.toLowerCase().includes(".mkv") || (episode).mkvFileId;
+            if (isMkv) {
+                // MKV can't play natively in most browsers — remux via FFmpeg
+                console.log("[player] MKV Format Error → engaging FFmpeg transcoder fallback");
+                setActiveAudioTrack(0);
+            } else if (nativeRetryCount.current < 2) {
+                // MP4 Format Error — usually a stale Drive redirect URL. Reload.
+                nativeRetryCount.current++;
+                console.log("[player] MP4 Format Error → reloading stream (attempt", nativeRetryCount.current, ")");
+                v.load();
+                v.play().catch(() => { });
+            }
         }
     }
 
