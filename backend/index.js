@@ -222,3 +222,5 @@ app.get('/api/stream/:fileId', async (req, res) => {
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`Transcoder service started on port ${PORT}`));
+ 
+ 
