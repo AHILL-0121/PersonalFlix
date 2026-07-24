@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const { spawn, execFile } = require('child_process');
+const { spawn } = require('child_process');
 const { google } = require('googleapis');
 const ffmpegStatic = require('ffmpeg-static');
 const ffprobeStatic = require('ffprobe-static');
@@ -52,7 +52,7 @@ app.get('/api/tracks/:fileId', async (req, res) => {
 
         let stdout = "";
         ffprobe.stdout.on('data', chunk => stdout += chunk);
-        ffprobe.stderr.on('data', () => { }); // suppress stderr
+        ffprobe.stderr.on('data', () => { });
         ffprobe.on('close', () => {
             try {
                 const data = JSON.parse(stdout);
@@ -128,7 +128,7 @@ app.get('/api/stream/:fileId', async (req, res) => {
     const audioTrackIdx = req.query.audioTrack;
     const startOffset = req.query.start ? parseFloat(req.query.start) : 0;
 
-    // ── Native mode: just redirect to a signed Google Drive URL ──────────────
+    // ── Native mode: redirect to signed Google Drive URL ─────────────────────
     if (!audioTrackIdx) {
         try {
             const drive = await getDriveClient();
@@ -145,15 +145,14 @@ app.get('/api/stream/:fileId', async (req, res) => {
         const drive = await getDriveClient();
 
         // Always fetch from byte 0 — MKV requires the full header at the start.
-        // FFmpeg's input-level -ss handle the seek efficiently.
+        // FFmpeg's input-level -ss handles the seek efficiently.
         const driveRes = await drive.files.get(
             { fileId, alt: 'media', supportsAllDrives: true },
             { responseType: 'stream' }
         );
 
-        // ── Build FFmpeg args ─────────────────────────────────────────────────
-        // KEY: put -ss BEFORE -i for input-level (decoder) seeking.
-        // This skips packets at the demuxer layer — almost instant vs. output-level.
+        // -ss BEFORE -i = input-level seek: FFmpeg discards packets at the
+        // demuxer layer without decoding. Fast and accurate for MKV.
         const args = [
             "-nostdin",
             "-probesize", "2000000",
@@ -161,8 +160,6 @@ app.get('/api/stream/:fileId', async (req, res) => {
             "-fflags", "+genpts+nobuffer+discardcorrupt",
         ];
 
-        // Input-level seek: FFmpeg skips packets at the demuxer layer (no decoding)
-        // until it reaches the keyframe just before startOffset. Fast and accurate.
         if (startOffset > 0) {
             args.push("-ss", String(startOffset));
         }
@@ -197,7 +194,6 @@ app.get('/api/stream/:fileId', async (req, res) => {
         ffmpeg.stdout.pipe(res);
 
         ffmpeg.stderr.on('data', chunk => {
-            // Only log the first few lines per request to avoid log spam
             const line = chunk.toString().trim();
             if (line && !line.startsWith('size=')) {
                 console.log(`[ffmpeg:${fileId.slice(0, 8)}] ${line}`);
@@ -222,5 +218,3 @@ app.get('/api/stream/:fileId', async (req, res) => {
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`Transcoder service started on port ${PORT}`));
- 
- 
