@@ -67,8 +67,11 @@ export default function VideoPlayer({
     const progressSaveTimer = useRef<ReturnType<typeof setInterval> | null>(null);
     // Debounce timer for server-side seeks
     const seekDebounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-    // Stall recovery timer — kicks in when the video has been buffering too long
-    const stallRecoveryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    // Freeze-detection timer — only armed explicitly on resume-after-pause
+    const freezeCheckTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    // Polling interval — reliable time-display fallback for mobile browsers that
+    // fire timeupdate infrequently on piped fMP4 (empty_moov) streams
+    const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
     // ── Stream / Track State ──────────────────────────────────────────────────
     const [activeAudioTrack, setActiveAudioTrack] = useState<number | null>(null);
@@ -136,15 +139,33 @@ export default function VideoPlayer({
     useEffect(() => {
         progressSaveTimer.current = setInterval(() => {
             const v = videoRef.current;
-            if (v && isPlaying) {
-                saveProgress(episode.id, v.currentTime);
+            if (v && !v.paused) {
+                saveProgress(episode.id, v.currentTime + seekOffsetRef.current);
             }
         }, PROGRESS_INTERVAL_MS);
 
+        // ── Polling fallback for mobile time display ───────────────────────────
+        // Mobile Edge fires 'timeupdate' unreliably on piped fMP4 streams.
+        // Poll every 250ms as a reliable fallback — very low overhead.
+        pollTimer.current = setInterval(() => {
+            const v = videoRef.current;
+            if (!v || v.paused) return;
+            const effective = v.currentTime + seekOffsetRef.current;
+            // Only update state if value actually changed (avoid needless renders)
+            if (Math.abs(effective - currentTimeRef.current) >= 0.1) {
+                currentTimeRef.current = effective;
+                setCurrentTime(effective);
+                if (v.buffered.length > 0) {
+                    setBuffered(v.buffered.end(v.buffered.length - 1) + seekOffsetRef.current);
+                }
+            }
+        }, 250);
+
         return () => {
             if (progressSaveTimer.current) clearInterval(progressSaveTimer.current);
+            if (pollTimer.current) clearInterval(pollTimer.current);
         };
-    }, [episode.id, isPlaying]);
+    }, [episode.id]);
 
     // Save on unmount / pause
     const saveNow = useCallback(() => {
@@ -273,67 +294,50 @@ export default function VideoPlayer({
 
     function onCanPlay() {
         setIsLoading(false);
-        // Cancel stall recovery — video is ready
-        if (stallRecoveryTimer.current) {
-            clearTimeout(stallRecoveryTimer.current);
-            stallRecoveryTimer.current = null;
+        // Cancel freeze-check — video is ready
+        if (freezeCheckTimer.current) {
+            clearTimeout(freezeCheckTimer.current);
+            freezeCheckTimer.current = null;
         }
     }
 
     function onWaiting() {
-        // Show spinner whenever the browser stalls waiting for more data
+        // Show spinner. Do NOT auto-restart here — on mobile Edge, onWaiting
+        // fires frequently as the buffer briefly empties during normal playback.
+        // Restarting the stream on every brief stall causes an infinite loop.
         setIsLoading(true);
-
-        // For FFmpeg streams: if we've been buffering > 5 sec after a stall,
-        // the pipe may be broken. Auto-recover by seeking to current position.
-        if (!isNative) {
-            if (stallRecoveryTimer.current) clearTimeout(stallRecoveryTimer.current);
-            stallRecoveryTimer.current = setTimeout(() => {
-                const v = videoRef.current;
-                if (!v) return;
-                const recoveryOffset = Math.floor(currentTimeRef.current);
-                console.log("[player] Stall recovery: restarting stream at", recoveryOffset);
-                const newUrl = recoveryOffset > 0
-                    ? `${baseStreamUrl}?start=${recoveryOffset}&audioTrack=${activeAudioTrack}`
-                    : `${baseStreamUrl}?audioTrack=${activeAudioTrack}`;
-                seekOffsetRef.current = recoveryOffset;
-                setStreamUrl(newUrl);
-                setBuffered(recoveryOffset);
-                v.pause();
-                v.src = newUrl;
-                v.load();
-                v.play().catch(() => { });
-                stallRecoveryTimer.current = null;
-            }, 5000);
-        }
     }
 
     function onPlay() {
         setIsPlaying(true);
         resetHideTimer();
 
-        // Mobile fix: after pause+resume on an fMP4 pipe stream, the browser
-        // sometimes can't continue reading. Schedule a stall check: if we're
-        // still loading after 4s, force a seek to current position to restart.
+        // Mobile fix: after pause+resume, the browser sometimes silently drops
+        // the HTTP connection to the Render backend, causing the video to freeze.
+        // We detect this by comparing v.currentTime 3 seconds after play fires:
+        // if it hasn't advanced at all, the pipe is dead → restart from current pos.
         if (!isNative) {
-            if (stallRecoveryTimer.current) clearTimeout(stallRecoveryTimer.current);
-            stallRecoveryTimer.current = setTimeout(() => {
+            if (freezeCheckTimer.current) clearTimeout(freezeCheckTimer.current);
+            const timeAtPlay = videoRef.current?.currentTime ?? 0;
+            freezeCheckTimer.current = setTimeout(() => {
                 const v = videoRef.current;
-                if (!v || !v.paused) {
-                    // Still playing fine → just check if time is actually advancing
-                    // (v.currentTime stalls at 0 when the pipe dies)
-                    if (v && v.currentTime < 0.5 && seekOffsetRef.current > 0) {
-                        // Stream is stuck at 0 — force restart at current offset
-                        const currentOffset = seekOffsetRef.current;
-                        const newUrl = `${baseStreamUrl}?start=${currentOffset}&audioTrack=${activeAudioTrack}`;
-                        setStreamUrl(newUrl);
-                        v.src = newUrl;
-                        v.load();
-                        v.play().catch(() => { });
-                    }
+                if (!v || v.paused) return; // user paused intentionally
+                const advanced = v.currentTime - timeAtPlay;
+                if (advanced < 0.2) {
+                    // Stream is frozen — restart from currentTimeRef (offset-adjusted)
+                    const offset = Math.floor(currentTimeRef.current);
+                    console.log("[player] Freeze detected on resume, restarting at", offset);
+                    const newUrl = offset > 0
+                        ? `${baseStreamUrl}?start=${offset}&audioTrack=${activeAudioTrack}`
+                        : `${baseStreamUrl}?audioTrack=${activeAudioTrack}`;
+                    seekOffsetRef.current = offset;
+                    setStreamUrl(newUrl);
+                    v.src = newUrl;
+                    v.load();
+                    v.play().catch(() => { });
                 }
-                stallRecoveryTimer.current = null;
-            }, 4000);
+                freezeCheckTimer.current = null;
+            }, 3000);
         }
     }
 
@@ -341,10 +345,10 @@ export default function VideoPlayer({
         setIsPlaying(false);
         setShowControls(true);
         saveNow();
-        // Cancel stall recovery when intentionally paused
-        if (stallRecoveryTimer.current) {
-            clearTimeout(stallRecoveryTimer.current);
-            stallRecoveryTimer.current = null;
+        // Cancel freeze detection when intentionally paused
+        if (freezeCheckTimer.current) {
+            clearTimeout(freezeCheckTimer.current);
+            freezeCheckTimer.current = null;
         }
     }
 
