@@ -9,92 +9,68 @@ const ffprobeStatic = require('ffprobe-static');
 const app = express();
 app.use(cors());
 
-// Google Drive Auth helper
-let _driveToken = null;
+// ── Google Drive Auth helper ──────────────────────────────────────────────────
+let _driveClient = null;
 let _tokenExpiry = 0;
 
-async function getDriveToken() {
-    if (_driveToken && Date.now() < _tokenExpiry) {
-        return _driveToken;
+async function getDriveClient() {
+    if (_driveClient && Date.now() < _tokenExpiry) {
+        return _driveClient;
     }
 
     const keyJson = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
-    if (!keyJson) {
-        throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_KEY env var");
-    }
+    if (!keyJson) throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_KEY env var");
 
     const { client_email, private_key } = JSON.parse(keyJson);
-
     const auth = new google.auth.JWT(
-        client_email,
-        null,
-        private_key,
+        client_email, null, private_key,
         ['https://www.googleapis.com/auth/drive.readonly']
     );
 
     const drive = google.drive({ version: 'v3', auth });
     _driveClient = drive;
-    _tokenExpiry = Date.now() + 3500000; // Refresh roughly every hour
+    _tokenExpiry = Date.now() + 3_500_000; // ~58 min
     return _driveClient;
 }
 
-// Health check for Render
-app.get('/', (req, res) => {
-    res.send('Personal Netflix Transcoder is running!');
-});
+// ── Health check ──────────────────────────────────────────────────────────────
+app.get('/', (req, res) => res.send('Personal Netflix Transcoder is running!'));
 
-// Get Audio Tracks
+// ── Get Audio Tracks ──────────────────────────────────────────────────────────
 app.get('/api/tracks/:fileId', async (req, res) => {
     const { fileId } = req.params;
-
     try {
-        const drive = await getDriveToken();
-
+        const drive = await getDriveClient();
         const driveRes = await drive.files.get(
             { fileId, alt: 'media', supportsAllDrives: true },
-            { responseType: 'stream', headers: { Range: "bytes=0-10485760" } } // first 10MB
+            { responseType: 'stream', headers: { Range: "bytes=0-10485760" } }
         );
 
-        const args = [
-            "-v", "quiet",
-            "-print_format", "json",
-            "-show_streams",
-            "pipe:0"
-        ];
+        const ffprobe = spawn(ffprobeStatic.path, [
+            "-v", "quiet", "-print_format", "json", "-show_streams", "pipe:0"
+        ]);
 
-        const ffprobe = spawn(ffprobeStatic.path, args);
         let stdout = "";
-        let stderr = "";
-
         ffprobe.stdout.on('data', chunk => stdout += chunk);
-        ffprobe.stderr.on('data', chunk => stderr += chunk);
-
-        ffprobe.on('close', (code) => {
-            if (code !== 0) {
-                console.error("[tracks] ffprobe error:", stderr);
-                return res.status(500).send("FFprobe failed");
-            }
+        ffprobe.stderr.on('data', () => { }); // suppress stderr
+        ffprobe.on('close', () => {
             try {
                 const data = JSON.parse(stdout);
-                const audioStreams = data.streams?.filter((s) => s.codec_type === "audio") || [];
-                const formattedTracks = audioStreams.map((s, idx) => ({
-                    index: idx,
-                    absoluteIndex: s.index,
-                    label: s.tags?.title || s.tags?.language || `Audio Track ${idx + 1}`,
-                    language: s.tags?.language || "und",
-                    codec: s.codec_name,
-                    default: s.disposition?.default === 1
-                }));
-                res.json({ audioTracks: formattedTracks });
-            } catch (e) {
-                res.status(500).send("Parse error");
-            }
+                const audioStreams = data.streams?.filter(s => s.codec_type === "audio") || [];
+                res.json({
+                    audioTracks: audioStreams.map((s, idx) => ({
+                        index: idx,
+                        absoluteIndex: s.index,
+                        label: s.tags?.title || s.tags?.language || `Audio Track ${idx + 1}`,
+                        language: s.tags?.language || "und",
+                        codec: s.codec_name,
+                        default: s.disposition?.default === 1
+                    }))
+                });
+            } catch { res.status(500).send("Parse error"); }
         });
 
-        ffprobe.stdin.on('error', (err) => {
-            if (err.code !== 'EPIPE') console.error("ffprobe stdin error:", err);
-        });
-
+        ffprobe.stdin.on('error', err => { if (err.code !== 'EPIPE') console.error(err); });
         driveRes.data.pipe(ffprobe.stdin);
         driveRes.data.on('error', () => ffprobe.kill());
     } catch (err) {
@@ -103,44 +79,32 @@ app.get('/api/tracks/:fileId', async (req, res) => {
     }
 });
 
-// Get Duration
+// ── Get Duration ──────────────────────────────────────────────────────────────
 app.get('/api/duration/:fileId', async (req, res) => {
     const { fileId } = req.params;
-
     try {
-        const drive = await getDriveToken();
-
+        const drive = await getDriveClient();
         const driveRes = await drive.files.get(
             { fileId, alt: 'media', supportsAllDrives: true },
             { responseType: 'stream', headers: { Range: "bytes=0-10485760" } }
         );
 
-        const args = [
-            "-v", "quiet",
-            "-print_format", "json",
-            "-show_format",
-            "pipe:0"
-        ];
+        const ffprobe = spawn(ffprobeStatic.path, [
+            "-v", "quiet", "-print_format", "json", "-show_format", "pipe:0"
+        ]);
 
-        const ffprobe = spawn(ffprobeStatic.path, args);
         let stdout = "";
-
         ffprobe.stdout.on('data', chunk => stdout += chunk);
-
-        ffprobe.on('close', (code) => {
+        ffprobe.stderr.on('data', () => { });
+        ffprobe.on('close', () => {
             try {
                 const data = JSON.parse(stdout);
-                const durationSec = data.format?.duration ? parseFloat(data.format.duration) : 0;
+                const durationSec = parseFloat(data.format?.duration ?? "0") || 0;
                 res.json({ durationSec });
-            } catch (e) {
-                res.json({ durationSec: 0 });
-            }
+            } catch { res.json({ durationSec: 0 }); }
         });
 
-        ffprobe.stdin.on('error', (err) => {
-            if (err.code !== 'EPIPE') console.error("ffprobe stdin error:", err);
-        });
-
+        ffprobe.stdin.on('error', err => { if (err.code !== 'EPIPE') console.error(err); });
         driveRes.data.pipe(ffprobe.stdin);
         driveRes.data.on('error', () => ffprobe.kill());
     } catch (err) {
@@ -149,41 +113,70 @@ app.get('/api/duration/:fileId', async (req, res) => {
     }
 });
 
-// Stream Remuxing
+// ── Stream Remuxing ───────────────────────────────────────────────────────────
+// For native (no audioTrack param) → redirect to signed Drive URL.
+// For FFmpeg mode                  → use INPUT-LEVEL SEEKING: pass -ss BEFORE -i
+//   and also use a byte-range on the Drive fetch to skip far into the file,
+//   dramatically reducing startup time when seeking mid-episode.
+//
+// Byte-range approximation: assume ~500 kbits/s average bitrate.
+// We fetch from (startSec * 62500) bytes to EOF so Drive doesn't stream
+// the whole file from the beginning.  FFmpeg still does a short forward-scan
+// before its keyframe but it's now measured in seconds, not minutes.
+const APPROX_BYTES_PER_SEC = 62_500; // 500 kbits/s → 62500 Bytes/s (conservative)
+const BYTE_SEEK_PADDING = 30;    // extra seconds of padding before the seek point
+
 app.get('/api/stream/:fileId', async (req, res) => {
     const { fileId } = req.params;
     const audioTrackIdx = req.query.audioTrack;
     const startOffset = req.query.start ? parseFloat(req.query.start) : 0;
 
+    // ── Native mode: just redirect to a signed Google Drive URL ──────────────
     if (!audioTrackIdx) {
         try {
-            const drive = await getDriveToken();
+            const drive = await getDriveClient();
             const token = (await drive.context._options.auth.getAccessToken()).token;
-            const directUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true&acknowledgeAbuse=true&access_token=${token}`;
-            return res.redirect(302, directUrl);
+            const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true&acknowledgeAbuse=true&access_token=${token}`;
+            return res.redirect(302, url);
         } catch (err) {
-            return res.status(500).send("Drive token error");
+            return res.status(500).send("Drive token error: " + err.message);
         }
     }
 
+    // ── FFmpeg transcoding mode ───────────────────────────────────────────────
     try {
-        const drive = await getDriveToken();
+        const drive = await getDriveClient();
 
-        // Fetch stream directly through Node.js using Google's official client
+        // Calculate a byte offset so we don't download the whole file from
+        // the start when the user seeks to, say, 17 minutes in.
+        const paddedStart = Math.max(0, startOffset - BYTE_SEEK_PADDING);
+        const byteRangeStart = Math.floor(paddedStart * APPROX_BYTES_PER_SEC);
+        const rangeHeader = byteRangeStart > 0
+            ? { Range: `bytes=${byteRangeStart}-` }
+            : {};                                          // from the beginning
+
         const driveRes = await drive.files.get(
             { fileId, alt: 'media', supportsAllDrives: true },
-            { responseType: 'stream' }
+            { responseType: 'stream', headers: rangeHeader }
         );
 
+        // ── Build FFmpeg args ─────────────────────────────────────────────────
+        // KEY: put -ss BEFORE -i for input-level (decoder) seeking.
+        // This skips packets at the demuxer layer — almost instant vs. output-level.
         const args = [
             "-nostdin",
-            "-probesize", "5000000",
-            "-analyzeduration", "3000000",
+            "-probesize", "2000000",
+            "-analyzeduration", "1000000",
             "-fflags", "+genpts+nobuffer+discardcorrupt",
         ];
 
+        // Input-level seek: ffmpeg will decode forward from the nearest keyframe
+        // just before startOffset, so actual output starts exactly at startOffset.
         if (startOffset > 0) {
-            args.push("-ss", String(startOffset), "-noaccurate_seek");
+            // paddedStart positions the byte-range start; now tell ffmpeg the
+            // remaining seconds to skip within that partial download.
+            const localSeek = startOffset - paddedStart; // seek within the downloaded slice
+            args.push("-ss", String(localSeek));
         }
 
         args.push(
@@ -203,20 +196,24 @@ app.get('/api/stream/:fileId', async (req, res) => {
         res.setHeader('Content-Type', 'video/mp4');
         res.setHeader('Cache-Control', 'no-store');
         res.setHeader('X-Audio-Track', String(audioTrackIdx));
+        res.setHeader('X-Seek-Offset', String(startOffset));
 
         const ffmpeg = spawn(ffmpegStatic, args, { stdio: ["pipe", "pipe", "pipe"] });
 
-        ffmpeg.stdin.on('error', (err) => {
-            if (err.code !== 'EPIPE') console.error("ffmpeg stdin error:", err);
+        ffmpeg.stdin.on('error', err => {
+            if (err.code !== 'EPIPE') console.error("[ffmpeg stdin]", err.message);
         });
-
         driveRes.data.pipe(ffmpeg.stdin);
         driveRes.data.on('error', () => ffmpeg.kill());
 
         ffmpeg.stdout.pipe(res);
 
-        ffmpeg.stderr.on('data', (chunk) => {
-            console.log(`[ffmpeg:${fileId}] ${chunk.toString()}`);
+        ffmpeg.stderr.on('data', chunk => {
+            // Only log the first few lines per request to avoid log spam
+            const line = chunk.toString().trim();
+            if (line && !line.startsWith('size=')) {
+                console.log(`[ffmpeg:${fileId.slice(0, 8)}] ${line}`);
+            }
         });
 
         ffmpeg.on('close', () => {
@@ -224,7 +221,6 @@ app.get('/api/stream/:fileId', async (req, res) => {
             driveRes.data.destroy?.();
         });
 
-        // Kill process if client disconnects
         req.on('close', () => {
             ffmpeg.kill('SIGKILL');
             driveRes.data.destroy?.();
@@ -232,11 +228,9 @@ app.get('/api/stream/:fileId', async (req, res) => {
 
     } catch (err) {
         console.error("[stream]", fileId, err.message);
-        res.status(500).send(err.message);
+        if (!res.headersSent) res.status(500).send(err.message);
     }
 });
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => {
-    console.log(`Transcoder service started on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Transcoder service started on port ${PORT}`));

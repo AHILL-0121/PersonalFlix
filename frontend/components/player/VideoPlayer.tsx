@@ -65,6 +65,9 @@ export default function VideoPlayer({
 
     const hideControlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const progressSaveTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+    // Debounce timer for server-side seeks — prevents spawning a new FFmpeg
+    // process on every frame while the user drags the scrubber.
+    const seekDebounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     // ── Stream / Track State ──────────────────────────────────────────────────
     const [activeAudioTrack, setActiveAudioTrack] = useState<number | null>(null);
@@ -264,6 +267,11 @@ export default function VideoPlayer({
         setIsLoading(false);
     }
 
+    function onWaiting() {
+        // Show spinner whenever the browser stalls waiting for more data
+        setIsLoading(true);
+    }
+
     function onPlay() {
         setIsPlaying(true);
         resetHideTimer();
@@ -319,22 +327,33 @@ export default function VideoPlayer({
             return;
         }
 
-        // --- Server-side seek fallback for un-transcoded MKVs ---
+        // --- Server-side seek for FFmpeg streams ---
+        // Update UI immediately (optimistic) so scrubbing feels responsive.
         seekOffsetRef.current = targetSec;
         currentTimeRef.current = targetSec;
-        setCurrentTime(targetSec); // optimistic update
+        setCurrentTime(targetSec);
         setBuffered(targetSec);
-        setIsLoading(true);
-        const newUrl = targetSec > 0
-            ? `${baseStreamUrl}?start=${targetSec}&audioTrack=${activeAudioTrack}`
-            : `${baseStreamUrl}?audioTrack=${activeAudioTrack}`;
-        setStreamUrl(newUrl);
 
-        // Explicitly force video reset
-        v.pause();
-        v.src = newUrl;
-        v.load();
-        v.play().catch(() => { });
+        // Debounce the actual stream restart — only kick off a new FFmpeg
+        // process 400 ms after the user stops dragging the scrubber.
+        // Without this, every pixel of scrub spawns a new backend process.
+        if (seekDebounceTimer.current) clearTimeout(seekDebounceTimer.current);
+        seekDebounceTimer.current = setTimeout(() => {
+            const currentV = videoRef.current;
+            if (!currentV) return;
+
+            setIsLoading(true);
+            const finalSec = seekOffsetRef.current;
+            const newUrl = finalSec > 0
+                ? `${baseStreamUrl}?start=${finalSec}&audioTrack=${activeAudioTrack}`
+                : `${baseStreamUrl}?audioTrack=${activeAudioTrack}`;
+            setStreamUrl(newUrl);
+
+            currentV.pause();
+            currentV.src = newUrl;
+            currentV.load();
+            currentV.play().catch(() => { });
+        }, 400);
     }
     seekToTimeRef.current = seekToTime;
 
@@ -480,6 +499,7 @@ export default function VideoPlayer({
                 onTimeUpdate={onTimeUpdate}
                 onLoadedMetadata={onLoadedMetadata}
                 onCanPlay={onCanPlay}
+                onWaiting={onWaiting}
                 onPlay={onPlay}
                 onPause={onPause}
                 onEnded={onEnded}
