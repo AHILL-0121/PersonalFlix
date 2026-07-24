@@ -255,12 +255,6 @@ export default function VideoPlayer({
         // Clear loading spinner as soon as we get time updates (data is flowing)
         setIsLoading(false);
 
-        // Cancel any pending stall recovery — data is flowing fine
-        if (stallRecoveryTimer.current) {
-            clearTimeout(stallRecoveryTimer.current);
-            stallRecoveryTimer.current = null;
-        }
-
         // Update buffered end (offset-corrected)
         if (v.buffered.length > 0) {
             setBuffered(v.buffered.end(v.buffered.length - 1) + seekOffsetRef.current);
