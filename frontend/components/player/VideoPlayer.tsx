@@ -377,6 +377,11 @@ export default function VideoPlayer({
         if (v.error.code === 4 && activeAudioTrack === null) {
             console.log("[player] Native playback rejected (Format Error). Engaging Server Transcoder proxy...");
             setActiveAudioTrack(0); // 0 triggers the server-side FFmpeg path
+            const fallbackUrl = `${baseStreamUrl}?start=${Math.floor(currentTimeRef.current)}&audioTrack=0`;
+            setStreamUrl(fallbackUrl);
+            v.src = fallbackUrl;
+            v.load();
+            v.play().catch(() => { });
         }
     }
 
