@@ -168,8 +168,12 @@ app.get('/api/stream/:fileId', async (req, res) => {
 
     try {
         const drive = await getDriveToken();
-        const token = (await drive.context._options.auth.getAccessToken()).token;
-        const fileUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true&acknowledgeAbuse=true`;
+
+        // Fetch stream directly through Node.js using Google's official client
+        const driveRes = await drive.files.get(
+            { fileId, alt: 'media', supportsAllDrives: true },
+            { responseType: 'stream' }
+        );
 
         const args = [
             "-nostdin",
@@ -183,13 +187,11 @@ app.get('/api/stream/:fileId', async (req, res) => {
         }
 
         args.push(
-            "-headers", `Authorization: Bearer ${token}\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n`,
-            "-i", fileUrl,
+            "-i", "pipe:0",
             "-map", "0:v:0",
             "-map", `0:a:${audioTrackIdx}`,
             "-c:v", "copy",
             "-c:a", "aac",
-            "-ac", "2",
             "-b:a", "192k",
             "-af", "aresample=async=1",
             "-avoid_negative_ts", "make_zero",
@@ -204,6 +206,13 @@ app.get('/api/stream/:fileId', async (req, res) => {
 
         const ffmpeg = spawn(ffmpegStatic, args, { stdio: ["pipe", "pipe", "pipe"] });
 
+        ffmpeg.stdin.on('error', (err) => {
+            if (err.code !== 'EPIPE') console.error("ffmpeg stdin error:", err);
+        });
+
+        driveRes.data.pipe(ffmpeg.stdin);
+        driveRes.data.on('error', () => ffmpeg.kill());
+
         ffmpeg.stdout.pipe(res);
 
         ffmpeg.stderr.on('data', (chunk) => {
@@ -212,11 +221,13 @@ app.get('/api/stream/:fileId', async (req, res) => {
 
         ffmpeg.on('close', () => {
             res.end();
+            driveRes.data.destroy?.();
         });
 
         // Kill process if client disconnects
         req.on('close', () => {
             ffmpeg.kill('SIGKILL');
+            driveRes.data.destroy?.();
         });
 
     } catch (err) {

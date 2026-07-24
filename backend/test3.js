@@ -9,10 +9,10 @@ async function test() {
     const auth = new google.auth.JWT(client_email, null, private_key, ['https://www.googleapis.com/auth/drive.readonly']);
     const token = (await auth.getAccessToken()).token;
 
-    const fileId = '1v9KTary9kuk8VxktA3Zb-PNUT_b1_5Em';
-    const fileUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true&acknowledgeAbuse=true`;
+    const fileId = '1Jo50GEfeMvsv0i4KSj5QOoasuStxVJFf';
+    const fileUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true&acknowledgeAbuse=true&access_token=${token}`;
     const args = [
-        '-headers', `Authorization: Bearer ${token}\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n`,
+        '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
         '-i', fileUrl,
         '-f', 'null', '-'
     ];
