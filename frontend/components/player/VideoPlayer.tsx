@@ -564,9 +564,15 @@ export default function VideoPlayer({
         >
             {/* ── Loading spinner (visible while FFmpeg starts up) ──────────── */}
             {isLoading && (
-                <div className="absolute inset-0 z-40 flex flex-col items-center justify-center gap-4 bg-black/60 backdrop-blur-sm pointer-events-none">
-                    <div className="h-14 w-14 animate-spin rounded-full border-4 border-white/20 border-t-white" />
-                    <p className="text-sm font-medium text-white/60 tracking-wide">Preparing video…</p>
+                <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/80 backdrop-blur-sm pointer-events-none">
+                    <div className="loader-stage" style={{ transform: "scale(0.8)" }}>
+                        <div className="ring"></div>
+                        <div className="logo-wrap">
+                            <img className="logo-img" src="/Personalflix.png" alt="Loading" />
+                            <div className="shine"></div>
+                        </div>
+                        <div className="loader-label">PREPARING VIDEO...</div>
+                    </div>
                 </div>
             )}
             {/* ── Video element ─────────────────────────────────────────────────── */}

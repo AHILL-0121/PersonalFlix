@@ -118,6 +118,131 @@
     cursor: pointer;
     box-shadow: 0 0 4px #F0A50088;
   }
+
+  /* Loader Custom Logo Component */
+  .loader-stage {
+    position: relative;
+    width: 220px;
+    height: 220px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .logo-wrap {
+    position: relative;
+    width: 140px;
+    height: 140px;
+    animation: loader-pulse 1.4s ease-in-out infinite;
+  }
+
+  .logo-img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: block;
+    filter: drop-shadow(0 0 0 rgba(240, 166, 15, 0));
+    animation: loader-glow 1.4s ease-in-out infinite;
+  }
+
+  .shine {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    -webkit-mask-image: url("/Personalflix.png");
+    -webkit-mask-size: contain;
+    -webkit-mask-repeat: no-repeat;
+    -webkit-mask-position: center;
+    mask-image: url("/Personalflix.png");
+    mask-size: contain;
+    mask-repeat: no-repeat;
+    mask-position: center;
+    background: linear-gradient(100deg,
+        rgba(255, 255, 255, 0) 30%,
+        rgba(255, 255, 255, 0.85) 50%,
+        rgba(255, 255, 255, 0) 70%);
+    background-size: 300% 100%;
+    background-position: 200% 0;
+    animation: loader-sweep 1.4s ease-in-out infinite;
+    mix-blend-mode: screen;
+  }
+
+  .ring {
+    position: absolute;
+    width: 190px;
+    height: 190px;
+    border-radius: 50%;
+    border: 2px solid rgba(240, 166, 15, 0.25);
+    border-top-color: rgba(240, 166, 15, 0.9);
+    animation: loader-spin 1s linear infinite;
+  }
+
+  @keyframes loader-pulse {
+
+    0%,
+    100% {
+      transform: scale(1);
+    }
+
+    50% {
+      transform: scale(1.08);
+    }
+  }
+
+  @keyframes loader-glow {
+
+    0%,
+    100% {
+      filter: drop-shadow(0 0 6px rgba(240, 166, 15, 0.15));
+    }
+
+    50% {
+      filter: drop-shadow(0 0 22px rgba(240, 166, 15, 0.55));
+    }
+  }
+
+  @keyframes loader-sweep {
+    0% {
+      background-position: 200% 0;
+    }
+
+    100% {
+      background-position: -200% 0;
+    }
+  }
+
+  @keyframes loader-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  .loader-label {
+    position: absolute;
+    bottom: -34px;
+    left: 0;
+    right: 0;
+    text-align: center;
+    font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    font-size: 12px;
+    letter-spacing: 3px;
+    color: rgba(255, 255, 255, 0.55);
+    animation: loader-fade 1.4s ease-in-out infinite;
+  }
+
+  @keyframes loader-fade {
+
+    0%,
+    100% {
+      opacity: 0.35;
+    }
+
+    50% {
+      opacity: 1;
+    }
+  }
 }
 
 /* ── Utilities ─────────────────────────────────────────────────────────────── */
