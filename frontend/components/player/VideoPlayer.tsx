@@ -193,6 +193,11 @@ export default function VideoPlayer({
         // Mobile Edge fires 'timeupdate' unreliably on piped fMP4 streams.
         // Poll every 250ms as a reliable fallback — very low overhead.
         pollTimer.current = setInterval(() => {
+            // Video is NOT paused → always clear the loading overlay.
+            // Firefox doesn't reliably fire timeupdate for fMP4 empty_moov streams,
+            // so this is the reliable fallback to dismiss "PREPARING VIDEO..."
+            const vp = videoRef.current;
+            if (vp && !vp.paused) setIsLoading(false);
             const v = videoRef.current;
             if (!v || v.paused) return;
             const effective = v.currentTime + seekOffsetRef.current;

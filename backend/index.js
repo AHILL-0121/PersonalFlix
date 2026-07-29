@@ -53,6 +53,24 @@ async function getDriveClient() {
 app.get('/', (req, res) => res.send('Personal Netflix Transcoder is running!'));
 app.get('/wakeup', (req, res) => res.json({ status: 'awake', ts: Date.now() }));
 
+// ── Global stream registry ────────────────────────────────────────────────────
+// Tracks one active FFmpeg process per fileId. When a new stream request
+// arrives for the same fileId (e.g. user reloads or navigates back), the old
+// process is killed immediately to free up CPU on the Render free tier.
+// Without this, an orphaned process from a previous tab keeps consuming
+// ~100% of the 0.1 vCPU allocation, starving the new stream.
+const activeStreams = new Map(); // fileId → { ffmpeg, driveStream, watchdog }
+
+function killStream(fileId) {
+    const entry = activeStreams.get(fileId);
+    if (!entry) return;
+    activeStreams.delete(fileId);
+    try { entry.ffmpeg.kill('SIGKILL'); } catch { }
+    try { entry.driveStream?.destroy?.(); } catch { }
+    if (entry.watchdog) clearTimeout(entry.watchdog);
+    console.log(`[stream] killed previous stream for ${fileId.slice(0, 8)}`);
+}
+
 // ── Get Audio Tracks ──────────────────────────────────────────────────────────
 app.get('/api/tracks/:fileId', async (req, res) => {
     const { fileId } = req.params;
@@ -285,6 +303,18 @@ app.get('/api/stream/:fileId', async (req, res) => {
 
         const ffmpeg = spawn(ffmpegStatic, args, { stdio: ["pipe", "pipe", "pipe"] });
 
+        // Kill any previous stream for this fileId (e.g. page reload, tab switch)
+        killStream(fileId);
+
+        // 30-minute watchdog: auto-kill any stream that outlives a full episode.
+        // Prevents runaway processes on Render's free tier from hogging the CPU.
+        const watchdog = setTimeout(() => {
+            console.log(`[stream] watchdog killing ${fileId.slice(0, 8)} after 30 min`);
+            killStream(fileId);
+        }, 30 * 60 * 1000);
+
+        activeStreams.set(fileId, { ffmpeg, driveStream: driveRes.data, watchdog });
+
         ffmpeg.stdin.on('error', err => {
             if (err.code !== 'EPIPE') console.error("[ffmpeg stdin]", err.message);
         });
@@ -301,13 +331,19 @@ app.get('/api/stream/:fileId', async (req, res) => {
         });
 
         ffmpeg.on('close', () => {
+            activeStreams.delete(fileId);
+            if (watchdog) clearTimeout(watchdog);
             res.end();
             driveRes.data.destroy?.();
         });
 
         req.on('close', () => {
-            ffmpeg.kill('SIGKILL');
-            driveRes.data.destroy?.();
+            // Kill FFmpeg AND destroy the Drive download stream.
+            // Without destroying driveRes.data, the Drive HTTP connection stays
+            // open, keeping ffmpeg.stdin readable — so FFmpeg never gets SIGPIPE
+            // and runs forever even after the browser tab is closed.
+            console.log(`[stream] client closed, killing ${fileId.slice(0, 8)}`);
+            killStream(fileId);
         });
 
     } catch (err) {
