@@ -45,59 +45,6 @@ async function getDriveClient() {
     return _driveClient;
 }
 
-// ── Video Codec Detection Cache ───────────────────────────────────────────────
-// Stores { codec: string, ts: number } keyed by fileId.
-// Avoids re-probing on every seek restart. TTL: 2 hours.
-const _codecCache = new Map();
-const CODEC_CACHE_TTL = 2 * 60 * 60 * 1000;
-
-// Probes the first 500KB of a Drive file to detect the primary video codec.
-// Returns 'hevc', 'h264', 'vp9', etc. Falls back to 'h264' on error.
-async function detectVideoCodec(drive, fileId) {
-    const cached = _codecCache.get(fileId);
-    if (cached && Date.now() - cached.ts < CODEC_CACHE_TTL) {
-        return cached.codec;
-    }
-
-    try {
-        const driveRes = await drive.files.get(
-            { fileId, alt: 'media', supportsAllDrives: true },
-            { responseType: 'stream', headers: { Range: 'bytes=0-524287' } } // 512KB probe
-        );
-
-        const codec = await new Promise((resolve) => {
-            const probe = spawn(ffprobeStatic.path, [
-                '-v', 'quiet',
-                '-print_format', 'json',
-                '-show_streams',
-                '-select_streams', 'v:0',
-                'pipe:0'
-            ]);
-
-            let stdout = '';
-            probe.stdout.on('data', c => stdout += c);
-            probe.stderr.on('data', () => { });
-            probe.on('close', () => {
-                try {
-                    const data = JSON.parse(stdout);
-                    resolve(data.streams?.[0]?.codec_name ?? 'h264');
-                } catch { resolve('h264'); }
-            });
-            probe.on('error', () => resolve('h264'));
-
-            probe.stdin.on('error', err => { if (err.code !== 'EPIPE') console.error('[probe stdin]', err.message); });
-            driveRes.data.pipe(probe.stdin);
-            driveRes.data.on('error', () => probe.kill());
-        });
-
-        console.log(`[codec] ${fileId.slice(0, 8)} → ${codec}`);
-        _codecCache.set(fileId, { codec, ts: Date.now() });
-        return codec;
-    } catch (err) {
-        console.error('[codec detect]', err.message);
-        return 'h264'; // safe fallback
-    }
-}
 
 // ── Health check / Wakeup ─────────────────────────────────────────────────────
 // The frontend calls this on player load to warm up the Render instance
@@ -257,20 +204,6 @@ app.get('/api/stream/:fileId', async (req, res) => {
     try {
         const drive = await getDriveClient();
 
-        // ── Step 1: Detect video codec (cached after first probe) ─────────────
-        // Firefox & most browsers DO NOT support HEVC (H.265) or VP9 in an MP4
-        // container. We must re-encode those to H.264. However, H.264 source
-        // files can be stream-copied (zero CPU) which is much faster.
-        const videoCodec = await detectVideoCodec(drive, fileId);
-        const needsRecode = ['hevc', 'h265', 'vp9', 'av1', 'mpeg2video'].includes(videoCodec);
-
-        if (needsRecode) {
-            console.log(`[stream] ${fileId.slice(0, 8)} codec=${videoCodec} → re-encoding to H.264`);
-        } else {
-            console.log(`[stream] ${fileId.slice(0, 8)} codec=${videoCodec} → copy (no re-encode)`);
-        }
-
-        // ── Step 2: Open the raw Drive stream from byte 0 ─────────────────────
         // MKV/EBML containers MUST be read from byte 0; mid-file byte-ranges
         // corrupt the header and crash FFmpeg.
         const driveRes = await drive.files.get(
@@ -278,53 +211,68 @@ app.get('/api/stream/:fileId', async (req, res) => {
             { responseType: 'stream' }
         );
 
-        // ── Step 3: Build FFmpeg args ─────────────────────────────────────────
+        // ── FFmpeg args ───────────────────────────────────────────────────────
+        // We always re-encode to H.264 (never copy) for two critical reasons:
+        //
+        // 1. CODEC COMPATIBILITY: These MKV files are HEVC (H.265) encoded.
+        //    Firefox, older Chromium, and many mobile browsers have zero native
+        //    HEVC support. Copying HEVC into an MP4 container produces a stream
+        //    the browser decodes as error 4 (MEDIA_ERR_SRC_NOT_SUPPORTED).
+        //
+        // 2. KEYFRAME INTERVAL — THE CRITICAL ONE:
+        //    frag_keyframe only flushes an fMP4 fragment at keyframe boundaries.
+        //    HEVC encoders use very large GOP sizes (200-400 frames, ~8-17s at
+        //    24fps). In copy mode the first flush waits for the first HEVC
+        //    keyframe — causing the 10+ second loading spinner.
+        //    With -g 48 we force a new H.264 keyframe every 2 seconds,
+        //    so the browser receives its first playable fragment in ~2s.
+        //
+        // Encoding profile:
+        //   -preset ultrafast  : skips expensive compression math; maximises
+        //                        encoding speed on Render's 0.1 vCPU instance.
+        //   -crf 28            : constant quality; balances size vs. quality.
+        //   -tune zerolatency  : disables b-frame reference delay; data reaches
+        //                        the muxer and browser as soon as it is encoded.
+        //   -vf scale=-2:720   : downscale to 720p — reduces pixel load ~60%,
+        //                        pushing encode speed from ~0.3x back to ~1x.
+        //   -pix_fmt yuv420p   : forces 8-bit colour; HEVC 10-bit (yuv420p10le)
+        //                        is rejected by most browser decoders.
+        //   -g 48              : keyframe every 48 frames (2s at 24fps).
+        //   -keyint_min 48     : prevents shorter keyframe intervals that could
+        //                        cause A/V sync drift on fragment boundaries.
         const args = [
             "-nostdin",
-            "-probesize", "500000",       // 500KB — cuts ~1.5s of startup latency
-            "-analyzeduration", "250000",  // 250ms — cuts ~0.75s of startup latency
+            "-probesize", "500000",   // 500KB — fast container sniff
+            "-analyzeduration", "250000",   // 250ms — fast stream analysis
             "-fflags", "+genpts+nobuffer+discardcorrupt",
         ];
 
         if (startOffset > 0) {
-            // Input-level -ss: demuxer discards packets without decoding them.
-            // Fast and accurate. Must come BEFORE -i for MKV containers.
+            // Input-level -ss: demuxer skips packets without decoding them.
+            // This is the fastest seek method for MKV; must come BEFORE -i.
             args.push("-ss", String(startOffset));
         }
 
-        args.push("-i", "pipe:0");
-        args.push("-map", "0:v:0");
-        // Optional audio map: the '?' prevents FFmpeg crashing on silent videos
-        args.push("-map", `0:a:${audioTrackIdx}?`);
-
-        if (needsRecode) {
-            // HEVC/VP9/AV1 → H.264 transcode.
-            // -preset ultrafast: skips heavy compression math, maximises speed on
-            //   Render's 0.1 vCPU shared instance.
-            // -crf 28: good quality/size tradeoff for web.
-            // -vf scale=-2:720: downscale to 720p — cuts pixel load by ~60%,
-            //   returning transcode speed from 0.3x → ~1.0x realtime.
-            // -pix_fmt yuv420p: forces 8-bit colour; without this, 10-bit HEVC
-            //   produces yuv420p10le which many browsers reject.
-            // -profile:v high: required by some clients for H.264 High profile.
-            args.push(
-                "-c:v", "libx264",
-                "-preset", "ultrafast",
-                "-crf", "28",
-                "-vf", "scale=-2:720",
-                "-pix_fmt", "yuv420p",
-                "-profile:v", "high"
-            );
-        } else {
-            // H.264 source: stream-copy the video — zero CPU, no quality loss.
-            args.push("-c:v", "copy");
-        }
-
         args.push(
+            "-i", "pipe:0",
+            "-map", "0:v:0",
+            "-map", `0:a:${audioTrackIdx}?`,  // '?' = silent-video safe
+            // Video: always H.264 with forced 2-second keyframes
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-tune", "zerolatency",
+            "-crf", "28",
+            "-vf", "scale=-2:720",
+            "-pix_fmt", "yuv420p",
+            "-g", "48",           // keyframe every 2s @ 24fps
+            "-keyint_min", "48",
+            // Audio: always AAC stereo
             "-c:a", "aac",
             "-b:a", "128k",
             "-af", "aresample=async=1",
             "-avoid_negative_ts", "make_zero",
+            // fMP4 streaming flags: write tiny moov immediately so the browser
+            // can start decoding before the full stream has been received.
             "-movflags", "frag_keyframe+empty_moov+default_base_moof",
             "-f", "mp4",
             "pipe:1"
