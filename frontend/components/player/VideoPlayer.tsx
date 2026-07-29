@@ -115,7 +115,19 @@ export default function VideoPlayer({
             : baseStreamUrl;
     });
 
-    // ── Controls auto-hide ────────────────────────────────────────────────────
+    // ── Loading-state dead-man timeout ─────────────────────────────────────────
+    // If the browser never fires canplay or timeupdate (common on Firefox with
+    // fMP4 empty_moov piped streams when the transcode is slow), the loading
+    // overlay would stay forever. This clears it after 30 s regardless.
+    useEffect(() => {
+        if (typeof window === 'undefined') return;
+        const tid = setTimeout(() => {
+            setIsLoading(false);
+        }, 30_000);
+        return () => clearTimeout(tid);
+    }, [streamUrl]);
+
+    // ── Controls auto-hide ────────────────────────────────────────────────────────
     const resetHideTimer = useCallback(() => {
         if (hideControlsTimer.current) clearTimeout(hideControlsTimer.current);
         setShowControls(true);
@@ -329,10 +341,12 @@ export default function VideoPlayer({
     }
 
     function onWaiting() {
-        // Show spinner. Do NOT auto-restart here — on mobile Edge, onWaiting
-        // fires frequently as the buffer briefly empties during normal playback.
-        // Restarting the stream on every brief stall causes an infinite loop.
-        setIsLoading(true);
+        // NOTE: Do NOT set isLoading=true here.
+        // Firefox fires 'waiting' repeatedly when the transcode speed (0.3x) is
+        // slower than playback — that's normal for a slow pipe. Setting the
+        // loading overlay on every 'waiting' event keeps the spinner permanently
+        // visible even though the video IS playing between buffer fills.
+        // isLoading only goes back to true during an explicit seek (seekToTime).
     }
 
     function onPlay() {
