@@ -7,7 +7,19 @@ const ffmpegStatic = require('ffmpeg-static');
 const ffprobeStatic = require('ffprobe-static');
 
 const app = express();
-app.use(cors());
+
+// Allow requests from the Vercel frontend explicitly
+app.use(cors({
+    origin: [
+        'https://sa-personal-flix.vercel.app',
+        /\.vercel\.app$/,
+        'http://localhost:3000'
+    ],
+    methods: ['GET', 'HEAD', 'OPTIONS'],
+    allowedHeaders: ['Range', 'Content-Type', 'Authorization'],
+    exposedHeaders: ['Content-Range', 'Content-Length', 'Accept-Ranges', 'Content-Type'],
+    credentials: false,
+}));
 
 // ── Google Drive Auth helper ──────────────────────────────────────────────────
 let _driveClient = null;
@@ -33,8 +45,12 @@ async function getDriveClient() {
     return _driveClient;
 }
 
-// ── Health check ──────────────────────────────────────────────────────────────
+// ── Health check / Wakeup ─────────────────────────────────────────────────────
+// The frontend calls this on player load to warm up the Render instance
+// so that by the time the user actually plays a MKV, the cold-start delay
+// has already been absorbed.
 app.get('/', (req, res) => res.send('Personal Netflix Transcoder is running!'));
+app.get('/wakeup', (req, res) => res.json({ status: 'awake', ts: Date.now() }));
 
 // ── Get Audio Tracks ──────────────────────────────────────────────────────────
 app.get('/api/tracks/:fileId', async (req, res) => {
@@ -125,7 +141,12 @@ app.get('/api/duration/:fileId', async (req, res) => {
 
 app.get('/api/stream/:fileId', async (req, res) => {
     const { fileId } = req.params;
-    const audioTrackIdx = req.query.audioTrack;
+    // CRITICAL: audioTrack=0 is a valid value. Use explicit null/undefined check,
+    // NOT a falsy check (!audioTrackIdx), because "0" is falsy in JavaScript.
+    const audioTrackRaw = req.query.audioTrack;
+    const audioTrackIdx = (audioTrackRaw !== undefined && audioTrackRaw !== null && audioTrackRaw !== '' && audioTrackRaw !== 'null' && audioTrackRaw !== 'undefined')
+        ? audioTrackRaw
+        : null;
     const startOffset = req.query.start ? parseFloat(req.query.start) : 0;
 
     // ── Pure Proxy mode (for MP4s blocked by mobile cross-site tracking) ──────
@@ -146,13 +167,14 @@ app.get('/api/stream/:fileId', async (req, res) => {
             // Pass headers from Google Drive to the client to support proper HTML5 video streaming
             const headers = driveRes.headers;
             for (const key in headers) {
-                // Ensure proper content type is set
                 res.setHeader(key, headers[key]);
             }
-            // For Safari/Webkit: explicitly ensure content-type is video/mp4 rather than generic
+            // Override content-type for proper browser sniffing
             if (headers['content-type']?.includes('octet-stream')) {
                 res.setHeader('content-type', 'video/mp4');
             }
+            res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
+            res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Content-Length, Accept-Ranges');
 
             // Must use the same status code Google returned (usually 206 for range requests)
             res.status(driveRes.status);
@@ -166,7 +188,7 @@ app.get('/api/stream/:fileId', async (req, res) => {
     }
 
     // ── Native mode: redirect to signed Google Drive URL ─────────────────────
-    if (!audioTrackIdx) {
+    if (audioTrackIdx === null) {
         try {
             const drive = await getDriveClient();
             const token = (await drive.context._options.auth.getAccessToken()).token;
@@ -190,24 +212,30 @@ app.get('/api/stream/:fileId', async (req, res) => {
 
         // -ss BEFORE -i = input-level seek: FFmpeg discards packets at the
         // demuxer layer without decoding. Fast and accurate for MKV.
+        // Reduce probesize and analyzeduration drastically to cut startup latency.
+        // MKV containers have their header at the start, so we don't need to read
+        // millions of bytes before beginning to output data.
         const args = [
             "-nostdin",
-            "-probesize", "2000000",
-            "-analyzeduration", "1000000",
+            "-probesize", "500000",        // 500KB (was 2MB) — cuts ~1.5s latency
+            "-analyzeduration", "250000",   // 250ms (was 1000ms) — cuts ~0.75s latency
             "-fflags", "+genpts+nobuffer+discardcorrupt",
         ];
 
         if (startOffset > 0) {
+            // Input-level seek: FFmpeg discards packets at the demuxer layer
+            // without decoding them. Much faster than output-level seek for MKV.
             args.push("-ss", String(startOffset));
         }
 
         args.push(
             "-i", "pipe:0",
             "-map", "0:v:0",
-            "-map", `0:a:${audioTrackIdx}`,
+            // Use optional mapping (?) so FFmpeg won't crash if audio track is absent
+            "-map", `0:a:${audioTrackIdx}?`,
             "-c:v", "copy",
             "-c:a", "aac",
-            "-b:a", "192k",
+            "-b:a", "128k",               // 128k (was 192k) — slightly less audio weight
             "-af", "aresample=async=1",
             "-avoid_negative_ts", "make_zero",
             "-movflags", "frag_keyframe+empty_moov+default_base_moof",

@@ -14,6 +14,10 @@ import type {
     WatchProgress,
 } from "@prisma/client";
 
+// The Render backend URL — used for the wakeup ping so cold-start latency
+// is absorbed before the user presses play.
+const TRANSCODER_BASE = process.env.NEXT_PUBLIC_TRANSCODER_URL ?? "https://personalflix.onrender.com";
+
 type FullEpisode = Episode & {
     title: Title;
     season: (Season & { episodes: { id: string; name: string; order: number }[] }) | null;
@@ -72,13 +76,21 @@ export default function VideoPlayer({
     // Polling interval — reliable time-display fallback for mobile browsers that
     // fire timeupdate infrequently on piped fMP4 (empty_moov) streams
     const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+    // Guard to prevent the MP4 proxy fallback from firing more than once
+    const hasProxied = useRef(false);
 
     // ── Stream / Track State ──────────────────────────────────────────────────
     const [activeAudioTrack, setActiveAudioTrack] = useState<number | null>(null);
 
+    // Detect MKV based on:
+    // 1. The episode has audio tracks stored in the DB (means we've already analysed it via ffprobe)
+    // 2. Or the episode name contains .mkv
+    // We do NOT rely on (episode as any).mkvFileId which was from an older schema.
+    const isMkvFile = !!(episode.audioTracks?.length > 0 || episode.name?.toLowerCase().includes(".mkv"));
+
     // If activeAudioTrack is null, we stream natively via range-requests.
     // If it's set, we stream via FFmpeg which is a pipe and requires server-side seeking.
-    const isNative = activeAudioTrack === null;
+    const isNative = activeAudioTrack === null && !isMkvFile;
 
     // ── Seek offset (server-side seeking for fMP4 streams) ───────────────────
     // fMP4 piped via empty_moov supports no byte-range seeking.
@@ -91,6 +103,13 @@ export default function VideoPlayer({
     const baseStreamUrl = `/api/stream/${episode.driveFileId}`;
 
     const [streamUrl, setStreamUrl] = useState(() => {
+        // MKV files always go through FFmpeg from the start — never attempt native.
+        if (isMkvFile) {
+            const track = activeAudioTrack ?? 0;
+            return initialSeek > 0
+                ? `${baseStreamUrl}?start=${initialSeek}&audioTrack=${track}`
+                : `${baseStreamUrl}?audioTrack=${track}`;
+        }
         return (!isNative && initialSeek > 0)
             ? `${baseStreamUrl}?start=${initialSeek}&audioTrack=${activeAudioTrack}`
             : baseStreamUrl;
@@ -111,6 +130,20 @@ export default function VideoPlayer({
             if (hideControlsTimer.current) clearTimeout(hideControlsTimer.current);
         };
     }, [resetHideTimer]);
+
+    // ── Backend pre-warming (Render cold-start mitigation) ───────────────────
+    // Render free-tier shuts down after inactivity. Firing /wakeup immediately
+    // on player mount absorbs the ~10s cold-start delay before the user hits play.
+    useEffect(() => {
+        if (!TRANSCODER_BASE) return;
+        const ctrl = new AbortController();
+        fetch(`${TRANSCODER_BASE}/wakeup`, { signal: ctrl.signal })
+            .then(() => console.log("[player] Render backend warmed up"))
+            .catch(() => { /* No-op: backend may be warming, that's fine */ });
+        return () => ctrl.abort();
+        // Only run once on mount
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     // ── Suppress harmless media AbortErrors globally ───────────────────────────
     // The browser fires AbortError when a media fetch is cancelled (seek, unmount,
@@ -371,16 +404,19 @@ export default function VideoPlayer({
 
         // MediaError 4: MEDIA_ERR_SRC_NOT_SUPPORTED
         if (v.error.code === 4 && activeAudioTrack === null) {
-            const isMkv = episode.name?.toLowerCase().includes(".mkv") || (episode as any).mkvFileId;
-            if (isMkv) {
+            if (isMkvFile) {
+                // MKV in a browser — route through FFmpeg transcoder immediately
                 console.log("[player] MKV Format Error → engaging FFmpeg transcoder fallback");
-                setActiveAudioTrack(0);
-                const fallbackUrl = `${baseStreamUrl}?start=${Math.floor(currentTimeRef.current)}&audioTrack=0`;
+                const track = 0;
+                setActiveAudioTrack(track);
+                const fallbackUrl = `${baseStreamUrl}?start=${Math.floor(currentTimeRef.current)}&audioTrack=${track}`;
                 setStreamUrl(fallbackUrl);
                 v.src = fallbackUrl;
                 v.load();
                 v.play().catch(() => { });
-            } else {
+            } else if (!hasProxied.current) {
+                // MP4 blocked by cross-site tracking on mobile — try proxy once
+                hasProxied.current = true;
                 console.log("[player] MP4 Format Error → routing through Server Proxy (bypassing Drive redirect)");
                 const proxyUrl = `${baseStreamUrl}?proxy=1`;
                 // Keep isNative = true because pure proxy supports standard HTML5 byte-range seeking!
