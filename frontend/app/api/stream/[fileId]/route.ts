@@ -63,13 +63,26 @@ export async function GET(req: Request, { params }: RouteParams) {
             }
         }
 
-        // ── Step 3: Audio-track remux path (FFmpeg) ───────────────────────────
-        // When a specific audio track is requested we must remux through FFmpeg
-        // because the browser can't natively switch embedded tracks for MKV.
-        // We copy video bit-for-bit (-c:v copy) and transcode only the selected
-        // audio track to AAC (-c:a aac) to ensure browser compatibility.
+        const transcoderUrl = process.env.TRANSCODER_URL;
+
+        // ── Step 3: MKV → always route to Render transcoder ──────────────────
+        // MKV files are HEVC-encoded and MUST be transcoded to H.264 — browsers
+        // cannot decode HEVC in an MP4 container. This check runs BEFORE the
+        // audioTrack check so that episodes without DB audio tracks (e.g. newly
+        // scanned episodes not yet probed by ffprobe) are also routed correctly.
+        // Without this, isMkv=true episodes with no audioTrack param would fall
+        // through to the raw Drive 302 redirect which Firefox blocks entirely.
+        if (isMkv && transcoderUrl) {
+            const track = effectiveTrackIdx ?? 0;
+            return Response.redirect(
+                `${transcoderUrl}/api/stream/${params.fileId}?start=${startOffset}&audioTrack=${track}`,
+                302
+            );
+        }
+
+        // ── Step 4: Audio-track remux path (FFmpeg) ───────────────────────────
+        // Non-MKV file with a specific audio track requested.
         if (effectiveTrackIdx !== null) {
-            const transcoderUrl = process.env.TRANSCODER_URL;
             if (transcoderUrl) {
                 return Response.redirect(`${transcoderUrl}/api/stream/${params.fileId}?start=${startOffset}&audioTrack=${effectiveTrackIdx}`, 302);
             }
