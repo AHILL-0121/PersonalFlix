@@ -1,211 +1,87 @@
 "use client";
 
-import { useRef, useCallback, useState } from "react";
-import { formatTime } from "@/lib/progress";
+import { useRef, useState } from "react";
+import { fmt } from "@/lib/ui";
 
-interface SeekBarProps {
-    currentTime: number;
-    duration: number;
-    buffered: number;
-    onSeek(t: number): void;
-    onSeekCommit?(t: number): void;
-}
+/** Seek bar: buffered range, hover time, drag to scrub (commits on release), ←/→ ±5 s. */
+export default function SeekBar({
+    time,
+    dur,
+    buf,
+    onSeek,
+    onDrag,
+}: {
+    time: number;
+    dur: number;
+    buf: number;
+    onSeek: (t: number) => void;
+    onDrag: (dragging: boolean) => void;
+}) {
+    const ref = useRef<HTMLDivElement>(null);
+    const [drag, setDrag] = useState<number | null>(null);
+    const [hover, setHover] = useState<{ x: number; t: number; px: number } | null>(null);
 
-export default function SeekBar({ currentTime, duration, buffered, onSeek, onSeekCommit }: SeekBarProps) {
-    const trackRef = useRef<HTMLDivElement>(null);
-    const [hoverTime, setHoverTime] = useState<number | null>(null);
-    const [hoverX, setHoverX] = useState(0);
-    const [isTouching, setIsTouching] = useState(false);
-    const isDragging = useRef(false);
-    // Track the last committed time so we don't re-fire identical seeks
-    const lastCommitRef = useRef<number>(-1);
+    const at = (clientX: number) => {
+        const r = ref.current!.getBoundingClientRect();
+        const x = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+        return { x, t: x * dur, px: x * r.width, w: r.width };
+    };
 
-    const getTimeFromClientX = useCallback(
-        (clientX: number): number => {
-            const el = trackRef.current;
-            if (!el || !duration) return 0;
-            const rect = el.getBoundingClientRect();
-            const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-            return ratio * duration;
-        },
-        [duration]
-    );
-
-    // ── Mouse handlers ────────────────────────────────────────────────────────
-    function handleMouseMove(e: React.MouseEvent<HTMLDivElement>) {
-        const t = getTimeFromClientX(e.clientX);
-        const el = trackRef.current;
-        if (!el) return;
-        const rect = el.getBoundingClientRect();
-        setHoverX(e.clientX - rect.left);
-        setHoverTime(t);
-        if (isDragging.current) {
-            onSeek(t);
-        }
-    }
-
-    function handleMouseLeave() {
-        if (!isDragging.current) setHoverTime(null);
-    }
-
-    function handleMouseDown(e: React.MouseEvent<HTMLDivElement>) {
-        e.stopPropagation();
-        isDragging.current = true;
-        const startT = getTimeFromClientX(e.clientX);
-        onSeek(startT);
-
-        const onMove = (ev: MouseEvent) => {
-            const t = getTimeFromClientX(ev.clientX);
-            onSeek(t);
-            setHoverTime(t);
-        };
-        const onUp = (ev: MouseEvent) => {
-            isDragging.current = false;
-            setHoverTime(null);
-            const t = getTimeFromClientX(ev.clientX);
-            if (onSeekCommit) {
-                onSeekCommit(t);
-            } else {
-                onSeek(t);
-            }
-            window.removeEventListener("mousemove", onMove);
-            window.removeEventListener("mouseup", onUp);
-        };
-        window.addEventListener("mousemove", onMove);
-        window.addEventListener("mouseup", onUp);
-    }
-
-    function handleClick(e: React.MouseEvent<HTMLDivElement>) {
-        e.stopPropagation();
-        if (isDragging.current) return; // handled in mouseup
-        const t = getTimeFromClientX(e.clientX);
-        onSeek(t);
-        if (onSeekCommit) onSeekCommit(t);
-    }
-
-    // ── Touch handlers (mobile) ───────────────────────────────────────────────
-    // Mobile Edge fires: touchstart → touchmove* → touchend
-    // We must call onSeekCommit on touchend, otherwise the stream never restarts.
-    function handleTouchStart(e: React.TouchEvent<HTMLDivElement>) {
-        e.stopPropagation();
-        setIsTouching(true);
-        const t = getTimeFromClientX(e.touches[0].clientX);
-        const el = trackRef.current;
-        if (el) {
-            const rect = el.getBoundingClientRect();
-            setHoverX(e.touches[0].clientX - rect.left);
-        }
-        setHoverTime(t);
-        onSeek(t); // optimistic preview update
-    }
-
-    function handleTouchMove(e: React.TouchEvent<HTMLDivElement>) {
-        e.stopPropagation();
-        const t = getTimeFromClientX(e.touches[0].clientX);
-        const el = trackRef.current;
-        if (el) {
-            const rect = el.getBoundingClientRect();
-            setHoverX(e.touches[0].clientX - rect.left);
-        }
-        setHoverTime(t);
-        onSeek(t); // live scrub preview (doesn't restart stream, just updates UI)
-    }
-
-    function handleTouchEnd(e: React.TouchEvent<HTMLDivElement>) {
-        e.stopPropagation();
-        setIsTouching(false);
-        setHoverTime(null);
-
-        // Get the final touch position from changedTouches (touches is empty on end)
-        const touch = e.changedTouches[0];
-        if (!touch) return;
-        const t = getTimeFromClientX(touch.clientX);
-
-        // Guard: don't re-commit same position
-        if (Math.abs(t - lastCommitRef.current) < 1) return;
-        lastCommitRef.current = t;
-
-        // THIS IS THE CRITICAL FIX: commit the seek → triggers stream restart
-        if (onSeekCommit) {
-            onSeekCommit(t);
-        } else {
-            onSeek(t);
-        }
-    }
-
-    const playedPct = duration ? (currentTime / duration) * 100 : 0;
-    const bufferedPct = duration ? (buffered / duration) * 100 : 0;
-    const hoverPct = duration && hoverTime !== null ? (hoverTime / duration) * 100 : 0;
-    // On mobile, always show the handle. On desktop, show on hover.
-    const showHandle = isTouching || hoverTime !== null;
+    const shown = drag ?? time;
+    const pct = dur ? (shown / dur) * 100 : 0;
+    const tipLeft = hover ? Math.max(40, Math.min((ref.current?.getBoundingClientRect().width ?? 0) - 40, hover.px)) : 0;
 
     return (
         <div
-            className="relative w-full py-3 cursor-pointer"
-            onClick={handleClick}
-            // Expand touch area vertically so it's easy to hit on mobile
-            style={{ touchAction: "none" }}
+            ref={ref}
+            className={`seek${drag !== null ? " drag" : ""}`}
+            role="slider"
+            tabIndex={0}
+            aria-label="Seek"
+            aria-valuemin={0}
+            aria-valuemax={Math.floor(dur)}
+            aria-valuenow={Math.floor(shown)}
+            aria-valuetext={`${fmt(shown)} of ${fmt(dur)}`}
+            onPointerMove={(e) => {
+                const a = at(e.clientX);
+                setHover(a);
+                if (drag !== null) setDrag(a.t);
+            }}
+            onPointerLeave={() => { if (drag === null) setHover(null); }}
+            onPointerDown={(e) => {
+                if (!dur) return;
+                ref.current!.setPointerCapture(e.pointerId);
+                const a = at(e.clientX);
+                setHover(a);
+                setDrag(a.t);
+                onDrag(true);
+            }}
+            onPointerUp={(e) => {
+                if (drag === null) return;
+                const t = at(e.clientX).t;
+                setDrag(null);
+                if (e.pointerType !== "mouse") setHover(null);
+                onDrag(false);
+                onSeek(t);
+            }}
+            onPointerCancel={() => { setDrag(null); setHover(null); onDrag(false); }}
+            onKeyDown={(e) => {
+                if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    onSeek(time + (e.key === "ArrowRight" ? 5 : -5));
+                }
+            }}
         >
-            {/* Hover / touch time tooltip */}
-            {hoverTime !== null && (
-                <div
-                    className="absolute -top-8 -translate-x-1/2 px-2 py-0.5 rounded bg-black/90 text-white text-xs font-mono pointer-events-none z-10 whitespace-nowrap"
-                    style={{ left: hoverX }}
-                >
-                    {formatTime(hoverTime)}
-                </div>
-            )}
-
-            {/* Track */}
-            <div
-                ref={trackRef}
-                id="seek-bar"
-                role="slider"
-                aria-label="Seek"
-                aria-valuemin={0}
-                aria-valuemax={Math.floor(duration)}
-                aria-valuenow={Math.floor(currentTime)}
-                className="relative w-full rounded-full bg-white/15 overflow-hidden transition-all duration-150"
-                style={{ height: showHandle ? "6px" : "3px" }}
-                onMouseMove={handleMouseMove}
-                onMouseLeave={handleMouseLeave}
-                onMouseDown={handleMouseDown}
-                onTouchStart={handleTouchStart}
-                onTouchMove={handleTouchMove}
-                onTouchEnd={handleTouchEnd}
-            >
-                {/* Hover preview tint */}
-                {hoverTime !== null && (
-                    <div
-                        className="absolute inset-y-0 left-0 bg-white/10 pointer-events-none"
-                        style={{ width: `${hoverPct}%` }}
-                    />
-                )}
-                {/* Buffered */}
-                <div
-                    className="absolute inset-y-0 left-0 bg-white/25 rounded-full transition-[width] duration-200 pointer-events-none"
-                    style={{ width: `${bufferedPct}%` }}
-                />
-                {/* Played — amber accent */}
-                <div
-                    className="absolute inset-y-0 left-0 rounded-full transition-[width] duration-100 pointer-events-none"
-                    style={{ width: `${playedPct}%`, background: "#F0A500" }}
-                />
+            <div className="seek-track">
+                <div className="seek-buf" style={{ width: `${dur ? Math.min(100, (buf / dur) * 100) : 0}%` }} />
+                <div className="seek-hover" style={{ width: `${hover ? hover.x * 100 : 0}%` }} />
+                <div className="seek-fill" style={{ width: `${pct}%` }} />
+                <div className="seek-knob" style={{ left: `${pct}%` }} />
             </div>
-
-            {/* Scrub handle — always visible on mobile touch, hover-only on desktop */}
-            <div
-                className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 rounded-full shadow-lg pointer-events-none transition-opacity duration-150"
-                style={{
-                    left: `${playedPct}%`,
-                    // Larger on mobile for easier grabbing
-                    width: isTouching ? "18px" : "14px",
-                    height: isTouching ? "18px" : "14px",
-                    background: "#F0A500",
-                    boxShadow: "0 0 8px #F0A50099",
-                    opacity: showHandle ? 1 : 0,
-                }}
-            />
+            <div className="seek-tip" style={{ left: tipLeft, opacity: hover || drag !== null ? undefined : 0 }}>
+                <span>{fmt(drag ?? hover?.t ?? 0)}</span>
+            </div>
         </div>
     );
 }

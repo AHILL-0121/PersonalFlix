@@ -36,3 +36,5 @@ sa_key.json
 input.mkv
 output.mp4
 sub_*.srt
+# TypeScript incremental build info
+*.tsbuildinfo

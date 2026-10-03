@@ -5,6 +5,7 @@ export const dynamic = "force-dynamic";
 
 export default async function TmdbConfigPage() {
     const titles = await db.title.findMany({
+        where: { libraryKey: { not: null } },
         orderBy: { name: "asc" },
         select: {
             id: true,

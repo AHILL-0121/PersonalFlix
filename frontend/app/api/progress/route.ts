@@ -41,7 +41,7 @@ export async function POST(req: Request) {
     return NextResponse.json(record);
 }
 
-// DELETE /api/progress?episodeId=...
+// DELETE /api/progress?episodeId=...  or  ?titleId=... (every episode of a title — "remove from Up Next")
 export async function DELETE(req: Request) {
     const { userId } = auth();
     if (!userId)
@@ -49,12 +49,15 @@ export async function DELETE(req: Request) {
 
     const { searchParams } = new URL(req.url);
     const episodeId = searchParams.get("episodeId");
-    if (!episodeId)
-        return NextResponse.json({ error: "episodeId required" }, { status: 400 });
+    const titleId = searchParams.get("titleId");
+    if (!episodeId && !titleId)
+        return NextResponse.json({ error: "episodeId or titleId required" }, { status: 400 });
 
-    try {
-        await db.watchProgress.delete({ where: { episodeId } });
-    } catch { }
+    if (titleId) {
+        await db.watchProgress.deleteMany({ where: { episode: { titleId } } });
+    } else {
+        await db.watchProgress.deleteMany({ where: { episodeId: episodeId! } });
+    }
 
     return NextResponse.json({ success: true });
 }

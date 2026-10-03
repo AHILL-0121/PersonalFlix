@@ -1,68 +1,37 @@
-import { db } from "@/lib/db";
-import { notFound } from "next/navigation";
-import VideoPlayer from "@/components/player/VideoPlayer";
 import type { Metadata } from "next";
+import { notFound } from "next/navigation";
+import Player from "@/components/player/Player";
+import { displayName, loadTitle } from "@/lib/catalog";
+import { db } from "@/lib/db";
 
 interface Props {
     params: { episodeId: string };
+    searchParams: { resume?: string; start?: string };
+}
+
+export const dynamic = "force-dynamic";
+
+async function getEpisode(id: string) {
+    return db.episode.findUnique({
+        where: { id },
+        select: { id: true, titleId: true, mpd: true, title: { select: { name: true } }, name: true },
+    });
 }
 
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
-    const ep = await db.episode.findUnique({
-        where: { id: params.episodeId },
-        include: { title: true },
-    });
-    return {
-        title: ep ? `${ep.name} — ${ep.title.name}` : "Player",
-        description: ep
-            ? `Watch ${ep.name} from ${ep.title.name}`
-            : "Video player",
-    };
+    const ep = await getEpisode(params.episodeId);
+    if (!ep) return { title: "Player" };
+    const name = displayName(ep.title.name);
+    return { title: ep.name === ep.title.name ? name : `${ep.name} — ${name}` };
 }
 
-async function getEpisodeData(episodeId: string) {
-    return db.episode.findUnique({
-        where: { id: episodeId },
-        include: {
-            title: true,
-            season: {
-                include: {
-                    episodes: {
-                        orderBy: { order: "asc" },
-                        select: { id: true, name: true, order: true },
-                    },
-                },
-            },
-            subtitleTracks: true,
-            audioTracks: true,
-            watchProgress: true,
-        },
-    });
-}
+export default async function PlayerPage({ params, searchParams }: Props) {
+    const ep = await getEpisode(params.episodeId);
+    if (!ep?.mpd) notFound();
+    const title = await loadTitle(ep.titleId);
+    if (!title) notFound();
 
-export default async function PlayerPage({ params }: Props) {
-    const episode = await getEpisodeData(params.episodeId);
-
-    if (!episode) notFound();
-
-    // Build prev/next episode IDs from the season episode list
-    const siblings = episode.season?.episodes ?? [];
-    const currentIdx = siblings.findIndex((e) => e.id === episode.id);
-    const prevEpisode = currentIdx > 0 ? siblings[currentIdx - 1] : null;
-    const nextEpisode =
-        currentIdx >= 0 && currentIdx < siblings.length - 1
-            ? siblings[currentIdx + 1]
-            : null;
-
-    return (
-        <div className="h-screen w-screen bg-black overflow-hidden">
-            <VideoPlayer
-                episode={episode}
-                prevEpisodeId={prevEpisode?.id ?? null}
-                nextEpisodeId={nextEpisode?.id ?? null}
-                savedPositionSec={episode.watchProgress?.positionSec ?? 0}
-                durationSec={episode.durationSec ?? null}
-            />
-        </div>
-    );
+    const start = searchParams.start !== undefined ? "start" : searchParams.resume ? "resume" : "ask";
+    // keyed by episode so moving to the next episode gets a fresh player
+    return <Player key={ep.id} title={title} episodeId={ep.id} mpd={ep.mpd} start={start} />;
 }

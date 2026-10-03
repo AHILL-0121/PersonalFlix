@@ -196,11 +196,12 @@ export default function TmdbConfigClient({ initialTitles }: { initialTitles: Tit
                                 <label className="text-xs text-neutral-500 font-medium">TMDb ID</label>
                                 <div className="flex gap-2">
                                     <input
-                                        type="number"
+                                        type="text"
+                                        inputMode="numeric"
                                         name="tmdbId"
                                         defaultValue={title.tmdbId ?? ""}
                                         placeholder="e.g. 578060"
-                                        className="w-full bg-neutral-800 border border-neutral-700 text-white text-sm rounded px-3 py-1.5 focus:outline-none focus:border-blue-500"
+                                        className="w-full min-w-0 bg-neutral-800 border border-neutral-700 text-white text-sm rounded px-3 py-1.5 focus:outline-none focus:border-blue-500"
                                     />
                                     <button
                                         type="submit"
