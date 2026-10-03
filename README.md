@@ -1,89 +1,59 @@
-# Personal Netflix (PersonalFlix)
+# PersonalFlix
 
-A beautiful, self-hosted streaming platform inspired by Netflix. Rather than paying for streaming services or dealing with complex media servers like Plex/Jellyfin, **PersonalFlix** connects directly to your Google Drive to stream your personal library of Movies and TV Shows. 
+A private, single-user streaming app for a movie and TV library kept in Google Drive. It runs entirely on free tiers, and video never passes through a server.
 
-It automatically scans your Google Drive folders, fetches rich metadata (posters, backdrops, episode plots) from TMDB and OMDb, and provides a premium, responsive UI for playback with cross-device watch progress tracking.
-
-## ✨ Features
-
-- **Google Drive Integration**: Uses the Google Drive API to stream video files directly. No need to download heavy video files or maintain a dedicated media server PC.
-- **Intelligent Metadata Matching**: Automatically queries both **TMDB** and **OMDb** to populate high-resolution posters, backdrops, ratings, and episode synopses based on your folder and file names.
-- **TMDb Manual Override Dashboard**: A built-in configuration UI (`/tmdb-config`) letting you cleanly fix mismatching entries and specifically opt-in to fetch deeply accurate TV Series metadata directly from TMDb!
-- **Progress Tracking & "Continue Watching"**: Automatically tracks watch progress per user, remembering exactly where you left off in an episode or movie.
-- **Live MKV Audio Track Remuxing**: Fully powered by a custom Next.js server-side FFmpeg integration natively routing MKV streams via local pipes. Includes robust handling for embedded multi-language audio track switching with perfect AV-sync `-noaccurate_seek` mapping over HTTP requests!
-- **Custom Video Player**: A premium, custom-built responsive HTML5 video player featuring +/- 10s skip, audio language switcher, volume memory, seamless Media Session API integration (hardware media keys), full-screen mode, and cross-browser pipe streaming.
-- **Modern Tech Stack**: Built with Next.js 14 App Router, styled with Tailwind CSS, and powered by server-side React components for blazing-fast performance.
-- **Secure Authentication**: Integrated with Clerk for seamless, secure user management.
-
-## 🛠️ Tech Stack
-
-- **Framework:** Next.js 14 (React)
-- **Styling:** Tailwind CSS, Lucide Icons
-- **Database:** PostgreSQL (Neon Serverless)
-- **ORM:** Prisma
-- **Auth:** Clerk
-- **APIs:** Google Drive API v3, TMDB API, OMDb API
-
-## 📂 Google Drive Folder Structure
-
-To ensure the scanner works correctly, your Google Drive root folder must be structured as follows:
+## How it works
 
 ```text
-MAIN_DRIVE_FOLDER/
-  ├─ Movies/
-  │   ├─ Inception (2010)/
-  │   │   └─ inception2010.mp4
-  │   └─ The Dark Knight/
-  │       └─ dark_knight.mkv
-  └─ Series/
-      └─ The Rookie/
-          ├─ Season 1/
-          │   ├─ therookie-S01E01.mkv
-          │   └─ therookie-S01E02.mkv
-          └─ Season 2/
-              └─ therookie-S02E01.mkv
+Drive: MOVIE/ + SERIES/ (originals, never modified)
+   │  Colab notebook (one-off batch): remux/re-encode → one H.264 video file + one AAC file per audio language,
+   │  packaged as DASH with MP4Box, uploaded as the org account
+   ▼
+Drive: STREAM/…mp4 files + STREAM/library.json (catalog: title, episode, duration, audio languages, DASH manifest)
+   │
+   │  "Sync library" button → POST /api/library/refresh copies library.json into Postgres
+   ▼                          and adds TMDB posters/backdrops/overviews
+Next.js on Vercel (pages + tiny JSON calls only) ── Neon Postgres (catalog, TMDB metadata, watch progress)
+   │
+   │  /api/token → short-lived drive.readonly token from the "PersonalFlix Read" Apps Script
+   ▼
+Browser: Shaka Player streams the DASH manifest straight from Drive (Authorization header),
+         switches audio language in place, and saves progress back to Postgres
 ```
 
-1. **Top-Level Categories**: e.g., `Movies`, `Series`, `Anime`
-2. **Title Folders**: Placed directly inside the category. Add the release year e.g. `(2010)` to improve TMDB matching accuracy.
-3. **Seasons (Series Only)**: Folders named `Season 1`, `Season 02`, etc.
-4. **Episodes/Files**: The actual video files securely hosted in Google Drive. 
+- **Browsers:** Firefox and Edge on Windows and Android. Video is always 8-bit H.264 and audio is AAC.
+- **Audio languages:** every language is a separate DASH track, so switching keeps your position.
+- **No Google Cloud Console needed:** the org account's token comes from an Apps Script web app that runs as that account (`apps-script/`).
 
-## 🚀 Local Setup
+## Features
 
-### 1. Prerequisites
-- Node.js 18+
-- A Google Cloud Platform project with the Drive API enabled & a Service Account JSON.
-- A free PostgreSQL database (e.g., Neon or Supabase).
-- API Keys for TMDB, OMDb, and Clerk.
+- "Screening Room" UI: filmstrip hero, Up Next row (a finished episode rolls on to the next one), library grid with filters and sorting, title sheet with season tabs, and Ctrl K / `/` search across titles and episodes
+- Player: resume prompt, audio-language menu (<kbd>A</kbd> cycles), speed, next-episode countdown, episode drawer, double-tap seek on touch, picture-in-picture, Media Session keys, and the full keyboard set (<kbd>?</kbd> in the player)
+- `/tmdb-config`: fix wrong TMDB matches and turn on per-series episode names and stills
 
-### 2. Environment Variables
-Create a `.env.local` (and add your DB url to `.env` for Prisma). Use `.env.example` as a template and fill in:
-- `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` & `CLERK_SECRET_KEY`
-- `DATABASE_URL` (in `.env`)
-- `GCP_SERVICE_ACCOUNT_EMAIL` & `GCP_PRIVATE_KEY`
-- `DRIVE_ROOT_FOLDER_ID` (The folder ID of `MAIN_DRIVE_FOLDER`)
-- `TMDB_API_KEY` & `OMDB_API_KEY`
+## Setup
 
-### 3. Install & Sync Database
+1. **Apps Script (as the org account).** Create a project from `apps-script/Code.gs` and `apps-script/appsscript.json`. Add a script property `PASSPHRASE`, run `authorize` once, then deploy it as a web app (Execute as: *Me*, access: *Anyone*). Keep the `/exec` URL.
+2. **Convert the library.** Run the Colab convert notebook. It prints the `library.json` file ID at the end.
+3. **Environment.** Copy `frontend/.env.example` to `frontend/.env.local` (and to the Vercel project settings) and fill it in.
+4. **Database.**
+   ```bash
+   cd frontend
+   npm install
+   npx prisma db push
+   ```
+5. **Run.** `npm run dev`, sign in, and press **Sync library** (the status pill in the top bar).
 
-```bash
-cd frontend
-npm install
+After each notebook run, press **Sync library** again. Titles that aren't converted yet stay hidden until they are.
 
-# Push the schema structure to your Postgres database and generate the Prisma Client
-npx prisma db push
-npx prisma generate
-```
+## Adding titles (`/upload`)
 
-### 4. Run the App
+1. **Upload.** Open `/upload` (the upload icon in the top bar). Drop movie files or whole series folders, from a PC or a phone. Names are cleaned up from the release names and checked against TMDB, and you can edit any of them. Files are then uploaded **from the browser straight into Drive**, in resumable chunks, and saved as `MOVIE/Title-2021/Title-2021.mkv` or `SERIES/Show - 2005/Season 01/Show - S01E05.mkv`. Vercel only opens the upload session. A title or episode that already exists asks before replacing it; the old file goes to Drive's bin.
+2. **Convert.** Run the convert notebook with `MODE = all`. It converts whatever isn't in `library.json` yet and skips the rest.
+3. **Stream.** Fill in `SYNC_URL` in the notebook and add a `SYNC_SECRET` Colab secret that matches the app's env. The app then syncs itself when the run ends. Otherwise press **Sync**.
 
-```bash
-npm run dev
-```
+Needs `DRIVE_WRITE_URL` / `DRIVE_WRITE_PASSPHRASE` (the "PersonalFlix Write" Apps Script) in the app's env.
 
-Open `http://localhost:3000` in your browser.
-Once signed in, click the **Refresh Library** button on the Home screen to pull in all your Drive content, fetch TMDB metadata, and start streaming!
+## Tech
 
-## 📜 License
-MIT License. Private use only.
+Next.js 14 (App Router) · Shaka Player (DASH) · Prisma + Neon Postgres · Clerk · TMDB / OMDb · Google Apps Script · Colab + FFmpeg + MP4Box
