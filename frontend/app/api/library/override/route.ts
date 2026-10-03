@@ -59,7 +59,8 @@ export async function PATCH(req: Request) {
             });
             await db.episode.updateMany({
                 where: { titleId: titleId },
-                data: { thumbnailUrl: null, overview: null },
+                // convertedAt: null makes the next library refresh re-process these episodes (names, stills)
+                data: { thumbnailUrl: null, overview: null, convertedAt: null },
             });
             return NextResponse.json({ ok: true, updated: updatedTitle });
         } else {

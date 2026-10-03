@@ -1,5 +1,5 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
+// Catalog + watch progress. The playable files themselves live in Drive (STREAM/ folder); the
+// convert notebook writes STREAM/library.json and POST /api/library/refresh copies it in here.
 
 generator client {
   provider = "prisma-client-js"
@@ -15,33 +15,29 @@ enum TitleType {
   series
 }
 
-enum TranscodeStatus {
-  pending    // MKV detected, not yet transcoded
-  processing // FFmpeg running right now
-  done       // MP4 uploaded, driveFileId points to the MP4
-  error      // Transcode failed
-}
-
 model Title {
   id            String    @id @default(uuid())
-  driveFolderId String    @unique
+  // library.json title key: "MOVIE/Kaadan-2021" or "SERIES/Ben 10 - 2005"
+  libraryKey    String?   @unique
+  // legacy: Drive folder ID from the old folder scanner (kept so old rows still match)
+  driveFolderId String?   @unique
   type          TitleType
   name          String
   posterUrl     String?
-  
-  // OMDb / TMDB / IMDb fields
-  imdbId        String?
-  tmdbId        Int?
-  tmdbEpisodeSync Boolean @default(false)
-  backdropUrl   String?
-  overview      String?
-  rating        Float?
-  year          Int?
 
-  seasons       Season[]
-  episodes      Episode[]
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  // OMDb / TMDB / IMDb fields
+  imdbId          String?
+  tmdbId          Int?
+  tmdbEpisodeSync Boolean @default(false)
+  backdropUrl     String?
+  overview        String?
+  rating          Float?
+  year            Int?
+
+  seasons   Season[]
+  episodes  Episode[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
 }
 
 model Season {
@@ -60,51 +56,36 @@ model Season {
 }
 
 model Episode {
-  id              String           @id @default(uuid())
-  seasonId        String?
-  titleId         String
-  driveFileId     String           @unique
-  mkvFileId       String?          // original MKV Drive file ID (set when MKV detected)
-  name            String
-  order           Int
-  durationSec     Int?
-  transcodeStatus TranscodeStatus? // null = native MP4, pending/processing/done/error = MKV flow
+  id          String  @id @default(uuid())
+  seasonId    String?
+  titleId     String
+  // library.json entry key: "MOVIE/Kaadan-2021" or "SERIES/Ben 10 - 2005/S01E05"
+  libraryKey  String? @unique
+  // Drive ID of the source video (mp4/mkv) the stream was made from
+  driveFileId String  @unique
+  name        String
+  order       Int
+  durationSec Int?
+
+  // DASH manifest with Drive BaseURLs, straight from library.json; null = not converted yet
+  mpd         String?
+  // [{ lang, label }] in the manifest's audio order
+  audio       Json?
+  height      Int?
+  convertedAt String?
 
   // OMDb / TMDB / IMDb fields
-  imdbId        String?
-  tmdbId        Int?
-  thumbnailUrl  String?
-  overview      String?
+  imdbId       String?
+  tmdbId       Int?
+  thumbnailUrl String?
+  overview     String?
 
-  season        Season?         @relation(fields: [seasonId], references: [id], onDelete: SetNull)
-  title         Title           @relation(fields: [titleId], references: [id], onDelete: Cascade)
-  subtitleTracks SubtitleTrack[]
-  audioTracks   AudioTrack[]
+  season        Season?        @relation(fields: [seasonId], references: [id], onDelete: SetNull)
+  title         Title          @relation(fields: [titleId], references: [id], onDelete: Cascade)
   watchProgress WatchProgress?
-  processed     Boolean         @default(false)
 
   @@index([titleId])
   @@index([seasonId])
-}
-
-model SubtitleTrack {
-  id          String  @id @default(uuid())
-  episodeId   String
-  language    String
-  driveFileId String
-  episode     Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
-
-  @@index([episodeId])
-}
-
-model AudioTrack {
-  id          String  @id @default(uuid())
-  episodeId   String
-  language    String
-  driveFileId String
-  episode     Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
-
-  @@index([episodeId])
 }
 
 model WatchProgress {
@@ -112,4 +93,12 @@ model WatchProgress {
   positionSec Float    @default(0)
   updatedAt   DateTime @updatedAt
   episode     Episode  @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+}
+
+// One row (id = 1): when library.json was last synced and what it said
+model SyncState {
+  id               Int      @id @default(1)
+  syncedAt         DateTime @default(now())
+  libraryUpdatedAt String?
+  entries          Int      @default(0)
 }

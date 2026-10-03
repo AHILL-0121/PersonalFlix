@@ -1,110 +1,45 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
+import type { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
-import { getDriveClient } from "@/lib/drive";
+import { fetchLibraryJson, type LibraryEntry } from "@/lib/driveToken";
 import { fetchWithRetry } from "@/lib/fetchWithRetry";
+import { isSyncCall } from "@/lib/syncAuth";
+
+// A first sync of a few hundred entries takes a while; later ones skip everything unchanged,
+// so a sync that runs out of time can simply be started again.
+export const maxDuration = 60;
+export const dynamic = "force-dynamic";
 
 /**
  * Parse a Drive folder name into { cleanName, year }.
- *
- * Handles all formats seen in the user's Drive:
- *   Movies:  "Aadukalam-2011"         → { cleanName: "Aadukalam",          year: 2011 }
- *            "Angels & Demons-2009"   → { cleanName: "Angels & Demons",    year: 2009 }
- *            "Aranmanai 2-2014"       → { cleanName: "Aranmanai 2",        year: 2014 }
- *   Series:  "Ben 10: Alien Force - 2008" → { cleanName: "Ben 10: Alien Force", year: 2008 }
- *            "Courage the Cowardly Dog - 1999"
- *
- * Algorithm: strip the LAST occurrence of an optional space + dash + 4-digit year
- * from the end of the string, which covers both "Name-Year" and "Name - Year".
+ *   "Aadukalam-2011" → Aadukalam / 2011 · "Ben 10: Alien Force - 2008" → Ben 10: Alien Force / 2008
+ *   "Movie Name (2011)" → Movie Name / 2011
  */
 function parseFolderName(raw: string): { cleanName: string; year: number | null } {
-    // Match trailing:  [ " - " | "-" ] followed by exactly 4 digits at end of string
     const match = raw.match(/^(.*?)\s*-\s*(\d{4})$/);
-    if (match) {
-        return { cleanName: match[1].trim(), year: parseInt(match[2], 10) };
-    }
-    // Parenthesised year fallback: "Movie Name (2011)"
+    if (match) return { cleanName: match[1].trim(), year: parseInt(match[2], 10) };
     const parenMatch = raw.match(/^(.+?)\s*\((\d{4})\)\s*$/);
-    if (parenMatch) {
-        return { cleanName: parenMatch[1].trim(), year: parseInt(parenMatch[2], 10) };
-    }
+    if (parenMatch) return { cleanName: parenMatch[1].trim(), year: parseInt(parenMatch[2], 10) };
     return { cleanName: raw.trim(), year: null };
 }
 
+type TitleMeta = {
+    tmdbId?: number;
+    imdbId?: string;
+    name?: string;
+    overview?: string | null;
+    posterUrl?: string | null;
+    backdropUrl?: string | null;
+    rating?: number | null;
+    year?: number | null;
+};
 
-/**
- * Normalise combined-episode separators in a filename title portion to " / ".
- */
-function normaliseEpisodeName(raw: string): string {
-    return raw
-        .trim()
-        .replace(/\s*\/\s*/g, " / ")
-        .replace(/\s+&\s+/g, " / ")
-        .replace(/\s+-\s+/g, " / ")
-        .replace(/^\s*\/\s*|\s*\/\s*$/g, "")
-        .trim();
-}
-
-/**
- * Parse episode metadata directly from a filename.
- *
- * Searches for a season+episode code ANYWHERE in the filename (not just at
- * the start) so filenames like:
- *   "Ben 10 Alien Force - S01E01.MP4"
- *   "S01E01 A Night at the Katz Motel-Cajun Granny Stew.mkv"
- *   "Koose Munisamy Veerappan S01-01-First Blood.mp4"
- * are all handled correctly.
- *
- * Returns null if no recognisable pattern is found.
- */
-function parseEpisodeFilename(filename: string): {
-    seasonNumber: number;
-    episodeNumber: number;
-    episodeName: string;
-} | null {
-    const base = filename.replace(/\.[^.]+$/, "");
-
-    // Pattern 1: S01E01 or S1E1 anywhere in the string
-    const seMatch = base.match(/[Ss](\d{1,2})[Ee](\d{1,3})/);
-    if (seMatch) {
-        const afterCode = base.slice(seMatch.index! + seMatch[0].length).replace(/^[\s\-_.]+/, "");
-        return {
-            seasonNumber: parseInt(seMatch[1], 10),
-            episodeNumber: parseInt(seMatch[2], 10),
-            episodeName: normaliseEpisodeName(afterCode),
-        };
-    }
-
-    // Pattern 2: S01-01 style (dash between season and episode number)
-    const dashMatch = base.match(/[Ss](\d{1,2})-(\d{1,2})[-\s]/);
-    if (dashMatch) {
-        const afterCode = base.slice(dashMatch.index! + dashMatch[0].length).replace(/^[\s\-_.]+/, "");
-        return {
-            seasonNumber: parseInt(dashMatch[1], 10),
-            episodeNumber: parseInt(dashMatch[2], 10),
-            episodeName: normaliseEpisodeName(afterCode),
-        };
-    }
-
-    // Pattern 3: 1x01 style anywhere
-    const xMatch = base.match(/(\d{1,2})x(\d{1,3})/i);
-    if (xMatch) {
-        const afterCode = base.slice(xMatch.index! + xMatch[0].length).replace(/^[\s\-_.]+/, "");
-        return {
-            seasonNumber: parseInt(xMatch[1], 10),
-            episodeNumber: parseInt(xMatch[2], 10),
-            episodeName: normaliseEpisodeName(afterCode),
-        };
-    }
-
-    return null;
-}
-
-async function fetchTmdbInfo(titleName: string, type: "movie" | "series", explicitTmdbId?: number | null) {
+async function fetchTmdbInfo(folderName: string, type: "movie" | "series", explicitTmdbId?: number | null): Promise<TitleMeta | null> {
     const apiKey = process.env.TMDB_API_KEY;
     if (!apiKey) return null;
     try {
-        const { cleanName, year } = parseFolderName(titleName);
+        const { cleanName, year } = parseFolderName(folderName);
         const searchType = type === "movie" ? "movie" : "tv";
         const nameField = type === "movie" ? "title" : "name";
         const dateField = type === "movie" ? "release_date" : "first_air_date";
@@ -112,53 +47,33 @@ async function fetchTmdbInfo(titleName: string, type: "movie" | "series", explic
 
         let result: any = null;
 
-        // ── Direct ID Lookup (Manual Override) ──────────────────────────────────
+        // Manual override from /tmdb-config
         if (explicitTmdbId) {
-            const url = `https://api.themoviedb.org/3/${searchType}/${explicitTmdbId}?api_key=${apiKey}`;
-            const res = await fetchWithRetry(url);
-            if (res.ok) {
-                result = await res.json();
-            }
+            const res = await fetchWithRetry(`https://api.themoviedb.org/3/${searchType}/${explicitTmdbId}?api_key=${apiKey}`);
+            if (res.ok) result = await res.json();
         }
 
-        // ── Search by Name & Year (Automated matching) ──────────────────────────
         if (!result) {
-            const url = new URL(`https://api.themoviedb.org/3/search/${searchType}`);
-            url.searchParams.set("api_key", apiKey);
-            url.searchParams.set("query", cleanName);
-            if (year) url.searchParams.set(yearParam, String(year));
+            const search = async (withYear: boolean) => {
+                const url = new URL(`https://api.themoviedb.org/3/search/${searchType}`);
+                url.searchParams.set("api_key", apiKey);
+                url.searchParams.set("query", cleanName);
+                if (withYear && year) url.searchParams.set(yearParam, String(year));
+                const res = await fetchWithRetry(url.toString());
+                return res.ok ? (((await res.json()).results ?? []) as any[]) : [];
+            };
+            let results = await search(true);
+            if (!results.length && year) results = await search(false);
 
-            const res = await fetchWithRetry(url.toString());
-            if (res.ok) {
-                const data = await res.json();
-                let results: any[] = data.results ?? [];
-
-                if (results.length === 0 && year) {
-                    const fallbackUrl = new URL(`https://api.themoviedb.org/3/search/${searchType}`);
-                    fallbackUrl.searchParams.set("api_key", apiKey);
-                    fallbackUrl.searchParams.set("query", cleanName);
-                    const fallback = await fetchWithRetry(fallbackUrl.toString());
-                    if (fallback.ok) {
-                        const fallbackData = await fallback.json();
-                        results = fallbackData.results ?? [];
-                    }
+            if (results.length) {
+                const q = cleanName.trim().toLowerCase();
+                const exact = results.filter((r) => (r[nameField] ?? "").trim().toLowerCase() === q);
+                results = exact.length ? exact : results;
+                if (year) {
+                    const sameYear = results.filter((r) => (r[dateField] ?? "").startsWith(String(year)));
+                    results = sameYear.length ? sameYear : results;
                 }
-
-                if (results.length > 0) {
-                    const normalizedQuery = cleanName.trim().toLowerCase();
-                    const exactTitle = results.filter(
-                        (r: any) => (r[nameField] ?? "").trim().toLowerCase() === normalizedQuery
-                    );
-                    results = exactTitle.length ? exactTitle : results;
-
-                    if (year) {
-                        const withYear = results.filter((r: any) => (r[dateField] ?? "").startsWith(String(year)));
-                        const withoutYear = results.filter((r: any) => !(r[dateField] ?? "").startsWith(String(year)));
-                        results = withYear.length ? withYear : withoutYear;
-                    }
-
-                    result = results[0];
-                }
+                result = results[0];
             }
         }
         if (!result) return null;
@@ -167,427 +82,244 @@ async function fetchTmdbInfo(titleName: string, type: "movie" | "series", explic
             tmdbId: result.id as number,
             name: (result[nameField] as string) || undefined,
             overview: (result.overview as string) || null,
-            posterUrl: result.poster_path
-                ? `https://image.tmdb.org/t/p/w500${result.poster_path}`
-                : null,
-            backdropUrl: result.backdrop_path
-                ? `https://image.tmdb.org/t/p/w1280${result.backdrop_path}`
-                : null,
+            posterUrl: result.poster_path ? `https://image.tmdb.org/t/p/w500${result.poster_path}` : null,
+            backdropUrl: result.backdrop_path ? `https://image.tmdb.org/t/p/w1280${result.backdrop_path}` : null,
             rating: (result.vote_average as number) || null,
-            year: result[dateField]
-                ? parseInt((result[dateField] as string).slice(0, 4), 10)
-                : null,
+            year: result[dateField] ? parseInt((result[dateField] as string).slice(0, 4), 10) : null,
         };
-    } catch (e) { }
-    return null;
-}
-
-// API Episode Scrapers removed per user request. 
-// We now strictly use the drive folder filename logic.
-
-async function fetchOmdbInfo(titleName: string, type: "movie" | "series") {
-    const apiKey = process.env.OMDB_API_KEY;
-    if (!apiKey) return null;
-    try {
-        const { cleanName, year } = parseFolderName(titleName);
-        const yearParam = year ? `&y=${year}` : "";
-        const res = await fetchWithRetry(
-            `http://www.omdbapi.com/?apikey=${apiKey}&t=${encodeURIComponent(cleanName)}&type=${type}${yearParam}`
-        );
-        const data = await res.json();
-        if (data.Response === "True") {
-            return {
-                name: data.Title !== "N/A" ? data.Title : undefined,
-                imdbId: data.imdbID !== "N/A" ? data.imdbID : undefined,
-                posterUrl: data.Poster !== "N/A" ? data.Poster : null,
-                overview: data.Plot !== "N/A" ? data.Plot : null,
-                rating: data.imdbRating && data.imdbRating !== "N/A" ? parseFloat(data.imdbRating) : null,
-                year: data.Year && data.Year !== "N/A" ? parseInt(data.Year) : null,
-                backdropUrl: data.Poster !== "N/A" ? data.Poster : null,
-            };
-        }
-    } catch (e) { }
-    return null;
-}
-
-async function fetchMetadataInfo(titleName: string, type: "movie" | "series", explicitTmdbId?: number | null) {
-    const tmdb = await fetchTmdbInfo(titleName, type, explicitTmdbId);
-    const omdb = await fetchOmdbInfo(titleName, type);
-    return { ...(omdb || {}), ...(tmdb || {}) }; // TMDB takes priority
-}
-
-/**
- * DELETE /api/library/refresh
- *
- * ⚠️  NUCLEAR WIPE — deletes ALL watch progress, episodes, seasons and titles
- * from the database so the next POST refresh rebuilds everything cleanly
- * from Google Drive.
- *
- * Runs deletes SEQUENTIALLY in FK-safe order to avoid PostgreSQL cascade
- * conflicts that occur when parallel deletes race against each other.
- */
-export async function DELETE() {
-    const { userId } = auth();
-    if (!userId)
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-
-    try {
-        // SEQUENTIAL — do NOT use Promise.all; parallel deletes with ON DELETE CASCADE
-        // cause FK constraint races in PostgreSQL.
-        const wpCount = await db.watchProgress.deleteMany({});
-        const epCount = await db.episode.deleteMany({});
-        const seCount = await db.season.deleteMany({});
-        const tiCount = await db.title.deleteMany({});
-
-        console.log(
-            `[library/refresh DELETE] Wiped DB: ${tiCount.count} titles, ` +
-            `${seCount.count} seasons, ${epCount.count} episodes, ${wpCount.count} progress records`
-        );
-        return NextResponse.json({
-            ok: true,
-            titlesDeleted: tiCount.count,
-            seasonsDeleted: seCount.count,
-            episodesDeleted: epCount.count,
-            progressDeleted: wpCount.count,
-        });
-    } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : "Wipe error";
-        console.error("[library/refresh DELETE]", message);
-        return NextResponse.json({ error: message }, { status: 500 });
+    } catch {
+        return null;
     }
 }
 
-/**
- * Run `tasks` with at most `limit` in-flight at once.
- * Returns results in the same order as the input array.
- */
-async function withConcurrency<T>(
-    tasks: (() => Promise<T>)[],
-    limit: number
-): Promise<T[]> {
-    const results: T[] = new Array(tasks.length);
-    let nextIdx = 0;
+async function fetchOmdbInfo(folderName: string, type: "movie" | "series"): Promise<TitleMeta | null> {
+    const apiKey = process.env.OMDB_API_KEY;
+    if (!apiKey) return null;
+    try {
+        const { cleanName, year } = parseFolderName(folderName);
+        const yearParam = year ? `&y=${year}` : "";
+        const res = await fetchWithRetry(
+            `https://www.omdbapi.com/?apikey=${apiKey}&t=${encodeURIComponent(cleanName)}&type=${type}${yearParam}`
+        );
+        const data = await res.json();
+        if (data.Response !== "True") return null;
+        return {
+            name: data.Title !== "N/A" ? data.Title : undefined,
+            imdbId: data.imdbID !== "N/A" ? data.imdbID : undefined,
+            posterUrl: data.Poster !== "N/A" ? data.Poster : null,
+            overview: data.Plot !== "N/A" ? data.Plot : null,
+            rating: data.imdbRating && data.imdbRating !== "N/A" ? parseFloat(data.imdbRating) : null,
+            year: data.Year && data.Year !== "N/A" ? parseInt(data.Year, 10) : null,
+            backdropUrl: data.Poster !== "N/A" ? data.Poster : null,
+        };
+    } catch {
+        return null;
+    }
+}
 
+/** TMDB first; OMDb only when TMDB has no match. */
+async function fetchMetadataInfo(folderName: string, type: "movie" | "series", explicitTmdbId?: number | null) {
+    return (await fetchTmdbInfo(folderName, type, explicitTmdbId)) ?? (await fetchOmdbInfo(folderName, type));
+}
+
+async function fetchTmdbEpisode(tmdbId: number, season: number, episode: number) {
+    try {
+        const res = await fetchWithRetry(
+            `https://api.themoviedb.org/3/tv/${tmdbId}/season/${season}/episode/${episode}?api_key=${process.env.TMDB_API_KEY}`
+        );
+        if (!res.ok) return null;
+        const d = await res.json();
+        return {
+            name: d.name && !/^episode\s*0?\d+$/i.test(String(d.name).trim()) ? (d.name as string) : null,
+            overview: (d.overview as string) || null,
+            thumbnailUrl: d.still_path ? `https://image.tmdb.org/t/p/w500${d.still_path}` : null,
+        };
+    } catch {
+        return null;
+    }
+}
+
+/** Run `tasks` with at most `limit` in flight; results keep input order. */
+async function withConcurrency<T>(tasks: (() => Promise<T>)[], limit: number): Promise<T[]> {
+    const results: T[] = new Array(tasks.length);
+    let next = 0;
     const worker = async () => {
-        while (nextIdx < tasks.length) {
-            const idx = nextIdx++;
-            results[idx] = await tasks[idx]();
+        while (next < tasks.length) {
+            const i = next++;
+            results[i] = await tasks[i]();
         }
     };
-
-    const workers = Array.from({ length: Math.min(limit, tasks.length) }, worker);
-    await Promise.all(workers);
+    await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, worker));
     return results;
 }
+
+/** "SERIES/Ben 10 - 2005/S01E05" → "SERIES/Ben 10 - 2005"; movie keys are already title keys. */
+const titleKeyOf = (key: string, e: LibraryEntry) => (e.type === "series" ? key.split("/").slice(0, 2).join("/") : key);
 
 /**
  * POST /api/library/refresh
  *
- * Walks the Drive root folder, syncs the folder tree into Postgres.
- * Optimised: skips metadata API calls for titles already in the DB with a
- * poster, and processes up to CONCURRENCY titles in parallel.
+ * Copies STREAM/library.json (written by the convert notebook) into Postgres. Titles and episodes that
+ * already exist are matched by library key, or by their source file's Drive ID for rows made by the old
+ * folder scanner, so TMDB metadata, manual overrides and watch progress carry over.
+ * Called by the Sync button, or by the convert notebook at the end of a run (Bearer SYNC_SECRET).
  */
-export async function POST() {
+export async function POST(req: Request) {
     const { userId } = auth();
-    if (!userId)
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-
-    const rootFolderId = process.env.DRIVE_ROOT_FOLDER_ID;
-    if (!rootFolderId) {
-        return NextResponse.json(
-            { error: "DRIVE_ROOT_FOLDER_ID not configured" },
-            { status: 500 }
-        );
-    }
+    if (!userId && !isSyncCall(req)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     try {
-        const drive = getDriveClient();
+        const library = await fetchLibraryJson();
+        const entries = Object.entries(library.entries);
 
-        // ── Helpers ─────────────────────────────────────────────────────────────
-        const listFolder = async (folderId: string) => {
-            const res = await drive.files.list({
-                q: `'${folderId}' in parents and trashed = false`,
-                fields: "files(id,name,mimeType,size)",
-                supportsAllDrives: true,
-                includeItemsFromAllDrives: true,
-                pageSize: 1000,
-            });
-            // Deduplicate by file ID — shared-drive folders can return the same
-            // file twice when includeItemsFromAllDrives is enabled.
-            const files = res.data.files ?? [];
-            const seen = new Set<string>();
-            return files.filter(f => {
-                if (!f.id || seen.has(f.id)) return false;
-                seen.add(f.id);
-                return true;
-            });
-        };
+        const groups = new Map<string, [string, LibraryEntry][]>();
+        for (const [key, e] of entries) {
+            const tk = titleKeyOf(key, e);
+            if (!groups.has(tk)) groups.set(tk, []);
+            groups.get(tk)!.push([key, e]);
+        }
 
-        const FOLDER_MIME = "application/vnd.google-apps.folder";
-        const VIDEO_MIMES = new Set(["video/mp4", "video/x-matroska", "video/webm"]);
-        const VIDEO_EXTS = [".mp4", ".mkv", ".webm", ".avi", ".mov", ".flv", ".wmv"];
+        const titles = await db.title.findMany({
+            select: { id: true, libraryKey: true, posterUrl: true, tmdbId: true, tmdbEpisodeSync: true, name: true },
+        });
+        const titleById = new Map(titles.map((t) => [t.id, t]));
+        const titleByKey = new Map(titles.filter((t) => t.libraryKey).map((t) => [t.libraryKey!, t]));
 
-        const isFolder = (f: { mimeType?: string | null }) =>
-            f.mimeType === FOLDER_MIME;
-
-        const isVideo = (f: { mimeType?: string | null; name?: string | null }) =>
-            VIDEO_MIMES.has(f.mimeType ?? "") ||
-            VIDEO_EXTS.some(ext => f.name?.toLowerCase().endsWith(ext));
-
-        const naturalOrder = (name: string) => {
-            const m = name.match(/(\d+)/);
-            return m ? parseInt(m[1], 10) : 0;
-        };
-
-        const episodeSort = (a: string, b: string) =>
-            a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
-
-        // ── Purge legacy category-level stubs ────────────────────────────────────
-        await db.title.deleteMany({
-            where: {
-                name: { in: ["MOVIE", "MOVIES", "SERIES", "movie", "movies", "series"] },
+        const episodes = await db.episode.findMany({
+            select: {
+                id: true, libraryKey: true, driveFileId: true, titleId: true, seasonId: true, convertedAt: true,
+                name: true, thumbnailUrl: true, overview: true,
             },
         });
+        const epByKey = new Map(episodes.filter((e) => e.libraryKey).map((e) => [e.libraryKey!, e]));
+        const epBySrc = new Map(episodes.map((e) => [e.driveFileId, e]));
 
-        // ── Pre-load existing titles to skip metadata calls for known entries ────
-        const existingTitles = await db.title.findMany({
-            select: { id: true, driveFolderId: true, posterUrl: true, tmdbId: true, name: true },
-        });
-        const existingMap = new Map(existingTitles.map(t => [t.driveFolderId, t]));
+        let changed = 0, unchanged = 0, newTitles = 0;
+        const errors: string[] = [];
 
-        // ── Pre-load existing episodes to skip thumbnail refetching ──────────────
-        const existingEpisodes = await db.episode.findMany({
-            select: { driveFileId: true, thumbnailUrl: true, transcodeStatus: true },
-        });
-        const existingEpMap = new Map(existingEpisodes.map(e => [e.driveFileId, e]));
+        const tasks = Array.from(groups.entries()).map(([titleKey, items]) => async () => {
+            try {
+                const first = items[0][1];
+                const type = first.type;
+                const folderName = titleKey.split("/")[1] ?? first.title;
 
-        const categoryFolders = await listFolder(rootFolderId);
-        let processed = 0;
-        const seenDriveFolderIds = new Set<string>();
-        const seenDriveFileIds = new Set<string>(); // Used to purge obsolete episodes
-        const CONCURRENCY = 6;
-
-        for (const categoryFolder of categoryFolders) {
-            if (!isFolder(categoryFolder)) continue;
-            if (!categoryFolder.id || !categoryFolder.name) continue;
-
-            const lowerName = categoryFolder.name.toLowerCase();
-            const titleType: "movie" | "series" =
-                lowerName === "movie" || lowerName === "movies" ? "movie" : "series";
-
-            const titleFolders = await listFolder(categoryFolder.id);
-
-            // Build one task per title folder, then run them in parallel batches.
-            // Each task wraps itself in try/catch so one failing title never
-            // kills the whole refresh (no Promise.all cascade rejection).
-            const tasks = titleFolders
-                .filter(tf => isFolder(tf) && tf.id && tf.name)
-                // Skip any folder already seen under another category
-                .filter(tf => !seenDriveFolderIds.has(tf.id!))
-                .map(titleFolder => async (): Promise<number> => {
-                    const folderId = titleFolder.id!;
-                    const folderName = titleFolder.name!;
-                    seenDriveFolderIds.add(folderId);
-
-                    try {
-                        const existing = existingMap.get(folderId);
-
-                        // Only call TMDb/OMDb if this title has no poster yet
-                        const needsMeta = !existing?.posterUrl;
-                        // Use existing tmdbId if present (for manual overrides).
-                        // If it's a manual override, posterUrl would be null but tmdbId would exist.
-                        const explicitTmdbId = existing?.tmdbId;
-
-                        const metadataInfo = needsMeta
-                            ? await fetchMetadataInfo(folderName, titleType, explicitTmdbId)
-                            : null;
-
-                        const title = await db.title.upsert({
-                            where: { driveFolderId: folderId },
-                            update: {
-                                name: folderName,
-                                type: titleType,
-                                ...(metadataInfo || {}),
-                            },
-                            create: {
-                                driveFolderId: folderId,
-                                name: folderName,
-                                type: titleType,
-                                ...(metadataInfo || {}),
-                            },
-                        });
-
-                        const titleChildren = await listFolder(folderId);
-                        let localProcessed = 0;
-
-                        if (titleType === "movie") {
-                            // ── Movie ─────────────────────────────────────────────────
-                            const videoFiles = titleChildren
-                                .filter(isVideo)
-                                .sort((a, b) => episodeSort(a.name ?? "", b.name ?? ""));
-
-                            for (let i = 0; i < videoFiles.length; i++) {
-                                const f = videoFiles[i];
-                                if (!f.id || !f.name) continue;
-                                seenDriveFileIds.add(f.id);
-
-                                const isMkv = (f.mimeType?.includes("matroska") || f.mimeType?.includes("mkv") || f.name?.toLowerCase().endsWith(".mkv")) ?? false;
-                                const existingStatus = existingEpMap.get(f.id) as any;
-                                const shouldSetPending = isMkv && !existingStatus?.transcodeStatus;
-
-                                await db.episode.upsert({
-                                    where: { driveFileId: f.id },
-                                    update: {
-                                        name: title.name,
-                                        order: i + 1,
-                                        titleId: title.id,
-                                        ...(shouldSetPending ? { mkvFileId: f.id, transcodeStatus: "pending" } : {}),
-                                    },
-                                    create: {
-                                        driveFileId: f.id,
-                                        name: title.name,
-                                        order: i + 1,
-                                        titleId: title.id,
-                                        ...(isMkv ? { mkvFileId: f.id, transcodeStatus: "pending" } : {}),
-                                    },
-                                });
-                                localProcessed++;
-                            }
-                        } else {
-                            // ── Series ────────────────────────────────────────────────
-                            const seasonFolders = titleChildren
-                                .filter(isFolder)
-                                .sort((a, b) => naturalOrder(a.name ?? "") - naturalOrder(b.name ?? ""));
-
-                            for (const sf of seasonFolders) {
-                                if (!sf.id || !sf.name) continue;
-
-                                const seasonNumber = parseInt(sf.name.match(/\d+/)?.[0] ?? "0", 10);
-
-                                const season = await db.season.upsert({
-                                    where: { titleId_number: { titleId: title.id, number: seasonNumber } },
-                                    update: {},
-                                    create: { titleId: title.id, number: seasonNumber },
-                                });
-
-                                const episodeFiles = (await listFolder(sf.id))
-                                    .filter(isVideo)
-                                    .sort((a, b) => episodeSort(a.name ?? "", b.name ?? ""));
-
-                                for (let ei = 0; ei < episodeFiles.length; ei++) {
-                                    const ef = episodeFiles[ei];
-                                    if (!ef.id || !ef.name) continue;
-                                    seenDriveFileIds.add(ef.id);
-
-                                    // ── Determine episode number ───────────────────────────
-                                    // parseEpisodeFilename now finds S##E## ANYWHERE in the
-                                    // filename (e.g. "Ben 10 Alien Force - S01E01.MP4"), so
-                                    // the correct episode number is always extracted.
-                                    // Falls back to alphabetical sort index when no code found.
-                                    const parsedEp = parseEpisodeFilename(ef.name);
-                                    const resolvedOrder = parsedEp?.episodeNumber ?? (ei + 1);
-
-                                    // ── Fetch episode metadata ─────────────────────────────
-                                    // TMDB/OMDB lookup intentionally skipped for episodes per user configuration!
-                                    // "tmdb is only use for poster URL and Backdrop URL then the no.of season and episodes should follow the format from Gdrive only"
-
-                                    // Name priority:
-                                    // 1. Embedded filename title  (from parseEpisodeFilename)
-                                    // 2. "Episode N" fallback
-                                    const embeddedName = parsedEp?.episodeName ?? "";
-                                    let resolvedName = embeddedName.length > 0
-                                        ? embeddedName
-                                        : `Episode ${resolvedOrder}`;
-
-                                    const isMkv = (ef.mimeType?.includes("matroska") || ef.mimeType?.includes("mkv") || ef.name?.toLowerCase().endsWith(".mkv")) ?? false;
-                                    const existingEp = existingEpMap.get(ef.id) as any;
-                                    const shouldSetPending = isMkv && !existingEp?.transcodeStatus;
-
-                                    let epThumb = existingEp?.thumbnailUrl ?? null;
-                                    let epOverview = existingEp?.overview ?? null;
-
-                                    if (title.tmdbEpisodeSync && title.tmdbId && !epThumb) {
-                                        try {
-                                            const tz = `https://api.themoviedb.org/3/tv/${title.tmdbId}/season/${seasonNumber}/episode/${resolvedOrder}?api_key=${process.env.TMDB_API_KEY}`;
-                                            const epRes = await fetchWithRetry(tz);
-                                            if (epRes.ok) {
-                                                const epData = await epRes.json();
-                                                // Only override episode name if TMDB actually provides one that isn't just "Episode X"
-                                                if (epData.name && !/^episode\s*0?\d+$/i.test(epData.name.trim())) {
-                                                    resolvedName = epData.name;
-                                                }
-                                                if (epData.overview) epOverview = epData.overview;
-                                                if (epData.still_path) {
-                                                    epThumb = `https://image.tmdb.org/t/p/w500${epData.still_path}`;
-                                                }
-                                            }
-                                        } catch (e) {
-                                            console.error(`TMDB Episode Fetch Error for ${resolvedName}:`, e);
-                                        }
-                                    }
-
-                                    await db.episode.upsert({
-                                        where: { driveFileId: ef.id },
-                                        update: {
-                                            name: resolvedName,
-                                            order: resolvedOrder,
-                                            seasonId: season.id,
-                                            titleId: title.id,
-                                            thumbnailUrl: epThumb,
-                                            overview: epOverview,
-                                            ...(shouldSetPending && { mkvFileId: ef.id, transcodeStatus: "pending" }),
-                                        },
-                                        create: {
-                                            driveFileId: ef.id,
-                                            name: resolvedName,
-                                            order: resolvedOrder,
-                                            seasonId: season.id,
-                                            titleId: title.id,
-                                            thumbnailUrl: epThumb,
-                                            overview: epOverview,
-                                            ...(isMkv && { mkvFileId: ef.id, transcodeStatus: "pending" }),
-                                        },
-                                    });
-                                    localProcessed++;
-                                }
-                            }
+                // an existing title: by key, else via any of its episodes' source files (old scanner rows)
+                let existing = titleByKey.get(titleKey);
+                if (!existing) {
+                    for (const [, e] of items) {
+                        const legacy = epBySrc.get(e.srcId);
+                        if (legacy && titleById.has(legacy.titleId)) {
+                            existing = titleById.get(legacy.titleId);
+                            break;
                         }
-
-                        return localProcessed;
-                    } catch (taskErr: unknown) {
-                        const msg = taskErr instanceof Error ? taskErr.message : String(taskErr);
-                        console.error(`[library / refresh] Error processing "${folderName}": ${msg} `);
-                        return 0; // Don't let one bad title abort the whole refresh
                     }
-                });
+                }
 
-            const counts = await withConcurrency(tasks, CONCURRENCY);
-            processed += counts.reduce((a, b) => a + b, 0);
-        }
+                const meta = existing?.posterUrl ? null : await fetchMetadataInfo(folderName, type, existing?.tmdbId);
+                const title = existing
+                    ? await db.title.update({
+                          where: { id: existing.id },
+                          data: { libraryKey: titleKey, type, ...(meta ?? {}) },
+                      })
+                    : await db.title.create({
+                          data: {
+                              libraryKey: titleKey, type, ...(meta ?? {}),
+                              name: meta?.name || first.title, year: meta?.year ?? first.year ?? null,
+                          },
+                      });
+                if (!existing) newTitles++;
 
-        // ── Prune stale titles (folders deleted from Drive) ──────────────────────
-        const stale = await db.title.findMany({
-            where: { driveFolderId: { notIn: Array.from(seenDriveFolderIds) } },
-            select: { id: true, name: true },
+                const seasonIds = new Map<number, string>();
+                const seasonIdFor = async (n: number) => {
+                    if (!seasonIds.has(n)) {
+                        const s = await db.season.upsert({
+                            where: { titleId_number: { titleId: title.id, number: n } },
+                            update: {},
+                            create: { titleId: title.id, number: n },
+                        });
+                        seasonIds.set(n, s.id);
+                    }
+                    return seasonIds.get(n)!;
+                };
+
+                for (const [key, e] of items) {
+                    const ex = epByKey.get(key) ?? epBySrc.get(e.srcId);
+                    const seasonId = type === "series" ? await seasonIdFor(e.season ?? 1) : null;
+                    if (ex && ex.libraryKey === key && ex.convertedAt === e.convertedAt && ex.titleId === title.id
+                        && ex.driveFileId === e.srcId && ex.seasonId === seasonId) {
+                        unchanged++;
+                        continue;
+                    }
+
+                    // a different old-scanner row already holds this source ID (e.g. a duplicate file) — it's superseded
+                    const clash = epBySrc.get(e.srcId);
+                    if (clash && ex && clash.id !== ex.id) {
+                        await db.episode.delete({ where: { id: clash.id } }).catch(() => {});
+                    }
+
+                    let name = type === "movie" ? title.name : e.epName || ex?.name || `Episode ${e.episode ?? 1}`;
+                    let thumbnailUrl = ex?.thumbnailUrl ?? null;
+                    let overview = ex?.overview ?? null;
+                    if (type === "series" && title.tmdbEpisodeSync && title.tmdbId && !thumbnailUrl) {
+                        const tm = await fetchTmdbEpisode(title.tmdbId, e.season ?? 1, e.episode ?? 1);
+                        if (tm) {
+                            name = tm.name ?? name;
+                            overview = tm.overview ?? overview;
+                            thumbnailUrl = tm.thumbnailUrl;
+                        }
+                    }
+
+                    const data = {
+                        libraryKey: key,
+                        driveFileId: e.srcId,
+                        titleId: title.id,
+                        seasonId,
+                        name,
+                        order: type === "series" ? e.episode ?? 1 : 1,
+                        durationSec: Math.round(e.duration) || null,
+                        mpd: e.mpd,
+                        audio: e.audio as unknown as Prisma.InputJsonValue,
+                        height: e.height ?? null,
+                        convertedAt: e.convertedAt,
+                        thumbnailUrl,
+                        overview,
+                    };
+                    if (ex) await db.episode.update({ where: { id: ex.id }, data });
+                    else await db.episode.create({ data });
+                    changed++;
+                }
+            } catch (err) {
+                errors.push(`${titleKey}: ${err instanceof Error ? err.message : String(err)}`);
+            }
         });
-        if (stale.length > 0) {
-            const staleIds = stale.map(t => t.id);
-            console.log(`[library / refresh] Pruning ${stale.length} stale title(s): `, stale.map(t => t.name));
-            await db.watchProgress.deleteMany({ where: { episode: { titleId: { in: staleIds } } } });
-            await db.episode.deleteMany({ where: { titleId: { in: staleIds } } });
-            await db.season.deleteMany({ where: { titleId: { in: staleIds } } });
-            await db.title.deleteMany({ where: { id: { in: staleIds } } });
-        }
+        await withConcurrency(tasks, 4);
 
-        // ── Prune stale episodes (files replaced or deleted from Drive) ─────────
-        const staleEpisodes = await db.episode.deleteMany({
-            where: { driveFileId: { notIn: Array.from(seenDriveFileIds) } }
+        // entries removed from library.json. Rows from the old scanner (no libraryKey) are left alone —
+        // they're hidden from the UI until the notebook converts them, and keep their watch progress.
+        const keys = entries.map(([k]) => k);
+        const prunedEpisodes = await db.episode.deleteMany({
+            where: { libraryKey: { not: null, notIn: keys } },
         });
-        if (staleEpisodes.count > 0) {
-            console.log(`[library / refresh] Pruned ${staleEpisodes.count} stale episode(s).`);
-        }
+        const prunedTitles = await db.title.deleteMany({
+            where: { libraryKey: { not: null, notIn: Array.from(groups.keys()) }, episodes: { none: {} } },
+        });
 
-        return NextResponse.json({ ok: true, processed, prunedTitles: stale.length, prunedEpisodes: staleEpisodes.count });
+        await db.syncState.upsert({
+            where: { id: 1 },
+            update: { syncedAt: new Date(), libraryUpdatedAt: library.updatedAt ?? null, entries: entries.length },
+            create: { id: 1, libraryUpdatedAt: library.updatedAt ?? null, entries: entries.length },
+        });
+
+        return NextResponse.json({
+            ok: errors.length === 0,
+            entries: entries.length,
+            changed,
+            unchanged,
+            newTitles,
+            prunedEpisodes: prunedEpisodes.count,
+            prunedTitles: prunedTitles.count,
+            errors: errors.slice(0, 10),
+        });
     } catch (err: unknown) {
         const message = err instanceof Error ? err.message : "Refresh error";
         console.error("[library/refresh]", message);
