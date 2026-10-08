@@ -163,7 +163,7 @@ export default function Hero({
                         </span>
                         {isSeries && <span>{code(it.ep)} · {it.ep.name}</span>}
                     </div>
-                    {t.overview && <p className="overview">{t.overview}</p>}
+                    <p className="overview">{t.overview}</p>
                     <div className="hero-actions">
                         <button className="btn btn-primary" onClick={() => onPlay(it)}><Icon name="play" />{cta}</button>
                         <button className="btn btn-ghost" onClick={() => onInfo(t)}><Icon name="info" />Details</button>

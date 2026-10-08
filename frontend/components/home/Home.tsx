@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useToast } from "@/components/ui/Toasts";
+import { driveToken } from "@/lib/shaka";
 import { computeUpNext, isNew, playHref, regrade, resumeTarget, type Ep, type TitleLite, type UpNextItem } from "@/lib/ui";
 import CommandPalette from "./CommandPalette";
 import Hero, { type HeroItem } from "./Hero";
@@ -39,6 +40,14 @@ export default function Home({ titles: initial, sync }: { titles: TitleLite[]; s
         }
         return items;
     }, [titles, upNext]);
+
+    // fetch the Drive token now (it's kept in memory across pages), so the first Play skips "Authorising stream…"
+    useEffect(() => { driveToken().catch(() => {}); }, []);
+
+    // prefetch the player's loading screen for the likely picks, so Play responds the moment it's pressed
+    useEffect(() => {
+        for (const it of heroItems) router.prefetch(playHref(it.ep.id, { resume: it.pos > 0 }));
+    }, [heroItems, router]);
 
     const sheetTitle = titles.find((t) => t.id === sheetId) ?? null;
     const sheetTarget = sheetTitle ? resumeTarget(sheetTitle, upNext) : null;
