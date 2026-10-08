@@ -37,11 +37,17 @@ export default function Player({
     episodeId,
     mpd,
     start,
+    swapped = false,
+    onGo,
 }: {
     title: TitleLite;
     episodeId: string;
     mpd: string;
     start: "start" | "resume" | "ask";
+    /** replaced the previous episode in place (no entrance animation) */
+    swapped?: boolean;
+    /** switch episodes without leaving the page; falls back to the router when missing */
+    onGo?: (target: Ep, opts: { start?: boolean }, pos: number) => Promise<void>;
 }) {
     const router = useRouter();
     const toast = useToast();
@@ -50,7 +56,6 @@ export default function Player({
     const prev = useMemo(() => prevEp(title, ep), [title, ep]);
     const isSeries = title.type === "series";
 
-    const wrapRef = useRef<HTMLDivElement>(null);
     const videoRef = useRef<HTMLVideoElement>(null);
     const playerRef = useRef<ShakaPlayer | null>(null);
 
@@ -297,15 +302,21 @@ export default function Player({
         if (!target || leaving.current) return;
         leaving.current = true;
         await save(true);
-        router.replace(playHref(target.id, opts));
-    }, [router, save]);
+        videoRef.current?.pause();
+        setPhase("loading");
+        setStep(`Up next: ${code(target)} · ${target.name}`);
+        if (onGo) await onGo(target, opts, posRef.current);
+        else router.replace(playHref(target.id, opts));
+    }, [onGo, router, save]);
 
     const toggleFullscreen = useCallback(async () => {
-        const wrap = wrapRef.current, v = videoRef.current as any;
+        // the whole page goes fullscreen, not the player <div>: the player is remounted for each episode,
+        // and a fullscreen element leaving the DOM would drop out of fullscreen
+        const root = document.documentElement, v = videoRef.current as any;
         try {
             if (document.fullscreenElement) await document.exitFullscreen();
-            else if (wrap?.requestFullscreen) {
-                await wrap.requestFullscreen();
+            else if (root.requestFullscreen) {
+                await root.requestFullscreen();
                 try { await (screen.orientation as any)?.lock?.("landscape"); } catch { /* not allowed everywhere */ }
             } else if (v?.webkitEnterFullscreen) v.webkitEnterFullscreen();
         } catch {
@@ -507,8 +518,7 @@ export default function Player({
 
     return (
         <div
-            ref={wrapRef}
-            className={`player open${idle ? " idle" : ""}`}
+            className={`player open${swapped ? " swapped" : ""}${idle ? " idle" : ""}`}
             role="dialog"
             aria-modal="true"
             aria-label="Video player"

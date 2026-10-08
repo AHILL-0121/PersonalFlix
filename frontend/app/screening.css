@@ -193,7 +193,12 @@ main { position: relative; z-index: 1; }
 .meta { display:flex; flex-wrap:wrap; align-items:center; gap:8px 14px; color: var(--text-2); font-size: 14px; }
 .meta .chip { padding: 3px 8px; border-radius: 6px; border: 1px solid var(--line-2); font-size: 12px; color: var(--text); }
 .meta .star { color: #ffc861; }
-.hero p.overview { color: var(--text-2); line-height: 1.6; font-size: 15px; margin: 16px 0 24px; max-width: 48ch; }
+.hero p.overview {
+  color: var(--text-2); line-height: 1.6; font-size: 15px; margin: 16px 0 24px; max-width: 48ch;
+  /* always 5 lines tall, so slides with short or long overviews don't shift the layout */
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 5; line-clamp: 5; overflow: hidden;
+  height: calc(1.6em * 5);
+}
 .hero-actions { display:flex; flex-wrap: wrap; gap: 10px; align-items:center; }
 .resume-meta { display:flex; align-items:center; gap:10px; margin-top: 18px; font-size: 13px; color: var(--text-2); }
 .resume-meta .track { width: 140px; height: 4px; border-radius: 4px; background: rgba(255,255,255,.12); overflow:hidden; }
@@ -433,6 +438,7 @@ footer { position: relative; z-index: 1; padding: 50px clamp(16px, 4vw, 48px) 11
   user-select: none; -webkit-user-select: none; touch-action: manipulation;
 }
 .player.open { display: block; animation: player-in .45s var(--ease); }
+.player.open.swapped { animation: none; } /* next episode in place: no zoom-in again */
 @keyframes player-in { from { opacity: 0; transform: scale(1.03); } }
 .player video.screen { position:absolute; inset:0; width:100%; height:100%; object-fit: contain; background:#000; }
 .player.idle { cursor: none; }
@@ -607,7 +613,7 @@ footer { position: relative; z-index: 1; padding: 50px clamp(16px, 4vw, 48px) 11
   .search-trigger { display: none; }
   .hero { padding-top: 96px; gap: 20px; }
   .hero h1 { font-size: 48px; }
-  .hero p.overview { font-size: 14px; margin: 12px 0 18px; display:-webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  .hero p.overview { font-size: 14px; margin: 12px 0 18px; -webkit-line-clamp: 3; line-clamp: 3; height: calc(1.6em * 3); }
   .strip { height: 230px; }
   .frame { flex-basis: 104px; }
   .frame.active { flex-basis: 156px; }
