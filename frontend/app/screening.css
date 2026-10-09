@@ -610,6 +610,7 @@ footer { position: relative; z-index: 1; padding: 50px clamp(16px, 4vw, 48px) 11
 @media (max-width: 720px) {
   .nav { gap: 10px; }
   .tabs, .sync .sync-label { display: none; }
+  .popover { position: fixed; top: 64px; left: 16px; right: 16px; width: auto; }
   .search-trigger { display: none; }
   .hero { padding-top: 96px; gap: 20px; }
   .hero h1 { font-size: 48px; }
