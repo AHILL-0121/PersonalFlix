@@ -37,6 +37,7 @@ const ICONS = {
     folder: <path {...S} d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" />,
     file: <g {...S}><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z" /><path d="M14 3v5h5" /></g>,
     audio: <g {...S}><path d="M3 18v-6a9 9 0 0 1 18 0v6" /><path d="M21 19a2 2 0 0 1-2 2h-1v-6h3zM3 19a2 2 0 0 0 2 2h1v-6H3z" /></g>,
+    scan: <g {...S}><circle cx="10" cy="10" r="7" /><path d="m21 21-4-4" /><path d="m7.5 10 2 2 3-3" strokeWidth={2.2} /></g>,
 } as const;
 
 export type IconName = keyof typeof ICONS;
