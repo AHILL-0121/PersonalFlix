@@ -42,6 +42,7 @@ export default function Nav({
     const [scrolled, setScrolled] = useState(false);
     const [popOpen, setPopOpen] = useState(false);
     const [busy, setBusy] = useState(false);
+    const [scanning, setScanning] = useState(false);
     const [err, setErr] = useState<string | null>(null);
     const [, tick] = useState(0);
     const tabsRef = useRef<HTMLElement>(null);
@@ -98,6 +99,29 @@ export default function Nav({
         }
     }
 
+    async function fullScan() {
+        setPopOpen(false);
+        setScanning(true);
+        setErr(null);
+        try {
+            const res = await fetch("/api/library/verify", { method: "POST" });
+            const d = await res.json();
+            if (!res.ok) throw new Error(d.error || `HTTP ${res.status}`);
+            if (d.removed?.length) {
+                toast(`Full scan · ${d.removed.length} missing file${d.removed.length > 1 ? "s" : ""} removed from library`, true);
+                router.refresh();
+            } else {
+                toast(`Full scan complete · all ${d.scanned} STREAM files OK`, true);
+            }
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            setErr(msg);
+            toast(`Full scan failed — ${msg.slice(0, 80)}`);
+        } finally {
+            setScanning(false);
+        }
+    }
+
     const tabs: [View, string][] = [["home", "Home"], ["movie", "Movies"], ["series", "Series"]];
 
     return (
@@ -135,8 +159,17 @@ export default function Nav({
                         <div className="pop-row">Wrong poster or title? <Link className="pop-link" href="/tmdb-config">Fix TMDB matches</Link></div>
                         {err && <div className="pop-err">{err}</div>}
                         <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-                            <button className="btn btn-ghost btn-sm" style={{ flex: 1 }} onClick={rescan} disabled={busy}>
-                                <Icon name="refresh" />Sync library
+                            <button className="btn btn-ghost btn-sm" style={{ flex: 1 }} onClick={rescan} disabled={busy || scanning}>
+                                <Icon name="refresh" />{busy ? "Syncing…" : "Sync library"}
+                            </button>
+                            <button
+                                className="btn btn-ghost btn-sm"
+                                style={{ flex: 1, color: scanning ? undefined : "var(--amber, #f59e0b)" }}
+                                onClick={fullScan}
+                                disabled={busy || scanning}
+                                title="Check every STREAM file against Drive and remove missing entries"
+                            >
+                                <Icon name="scan" />{scanning ? "Scanning…" : "Full scan"}
                             </button>
                         </div>
                     </div>

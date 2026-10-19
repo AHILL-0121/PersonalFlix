@@ -3,7 +3,7 @@
  * an upload session) — the video bytes go from the browser straight to Drive, never through Vercel.
  */
 
-import { DRIVE_API, getDriveToken, getDriveWriteToken } from "@/lib/driveToken";
+import { DRIVE_API, getDriveToken, getDriveWriteToken, type LibraryJson } from "@/lib/driveToken";
 import {
     episodeFileName, extOf, isVideoName, mimeFor, movieFileName, movieFolderName, normTitle, parseEpisode,
     parseFolderName, seasonFolderName, seasonFromDir, seriesFolderName, type UploadSpec,
@@ -216,4 +216,40 @@ export async function recentUploads(limit = 40): Promise<DriveFile[]> {
     }).toString();
     const d = await json<{ files: DriveFile[] }>(await driveFetch(getDriveToken, url.toString()), "List uploads");
     return d.files;
+}
+
+/**
+ * Overwrite STREAM/library.json in Drive with the given data.
+ * Uses uploadType=media (simple upload) — library.json is always small.
+ */
+export async function writeLibraryJson(data: LibraryJson): Promise<void> {
+    const fileId = process.env.LIBRARY_FILE_ID;
+    if (!fileId) throw new Error("LIBRARY_FILE_ID is not configured");
+    const res = await driveFetch(
+        getDriveWriteToken,
+        `${UPLOAD_API}/files/${fileId}?uploadType=media&supportsAllDrives=true`,
+        {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(data),
+        }
+    );
+    if (!res.ok) throw new Error(`writeLibraryJson: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
+}
+
+/**
+ * Returns true when the Drive file exists and is not in the trash.
+ * A 404 means permanently deleted; trashed = true means "soft-deleted".
+ * Any other non-OK status (e.g. 403 due to quota) is treated as "probably exists"
+ * so we don't falsely prune entries during a transient API hiccup.
+ */
+export async function checkDriveFileExists(fileId: string): Promise<boolean> {
+    const res = await driveFetch(
+        getDriveToken,
+        `${DRIVE_API}/files/${fileId}?fields=id%2Ctrashed&supportsAllDrives=true`
+    );
+    if (res.status === 404) return false;
+    if (!res.ok) return true; // quota / server error — assume exists, safe default
+    const d = (await res.json()) as { id?: string; trashed?: boolean };
+    return !d.trashed;
 }
